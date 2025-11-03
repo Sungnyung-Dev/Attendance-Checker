@@ -1,0 +1,17 @@
+# node
+node_modules/
+npm-debug.log*
+.yarn/*
+.pnpm-store/
+
+# env
+.env
+
+# data (운영 데이터는 커밋 금지)
+data/attendance-*.json
+data/ledger.json
+data/backups/
+
+# OS/IDE
+.DS_Store
+.vscode/

@@ -1,0 +1,29 @@
+{
+  "members": [
+    {
+      "id": "u01",
+      "name": "강준서",
+      "active": true
+    },
+    {
+      "id": "u02",
+      "name": "박진환",
+      "active": true
+    },
+    {
+      "id": "u03",
+      "name": "안정우",
+      "active": true
+    },
+    {
+      "id": "u04",
+      "name": "이현민",
+      "active": true
+    },
+    {
+      "id": "u05",
+      "name": "임현웅",
+      "active": true
+    }
+  ]
+}
