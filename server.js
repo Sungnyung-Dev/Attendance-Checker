@@ -91,7 +91,7 @@ app.post('/api/finalize', authAdmin, async (req, res) => {
     // ===== 각 멤버 벌금 계산 =====
     members.forEach(m => {
       const count = counts[m.id] || 0;
-      const deficit = Math.max(0, 4 - count);
+      const deficit = Math.max(0, 5 - count);
       if (deficit > 0) {
         ledger.entries.push({
           weekId,
