@@ -270,17 +270,31 @@ async function loadLedgerChart() {
 
   try {
     const data = await fetchJSON('/api/ledger?summary=week');
+    // weekId 오름차순 정렬
     const rows = (data.rows || []).sort((a, b) => a.weekId > b.weekId ? 1 : -1);
 
     const labels = rows.map(r => fmtWeekId(r.weekId));
-    const fines = rows.map(r => r.totalFine || 0);
-    const outs  = rows.map(r => r.outstanding || 0);
+
+    // 🔹 주차별 합계를 "누적"으로 변환
+    const fines = [];
+    const outs  = [];
+    let cumFine = 0;
+    let cumOut  = 0;
+
+    for (const r of rows) {
+      const f = Number(r.totalFine || 0);
+      const o = Number(r.outstanding || 0);
+      cumFine += f;
+      cumOut  += o;
+      fines.push(cumFine);   // 누적 벌금
+      outs.push(cumOut);     // 누적 미납액
+    }
 
     const chartData = {
       labels,
       datasets: [
         {
-          label: '총 벌금',
+          label: '누적 총 벌금',
           data: fines,
           fill: false,
           borderColor: 'rgba(54, 162, 235, 1)',
@@ -289,7 +303,7 @@ async function loadLedgerChart() {
           borderWidth: 2
         },
         {
-          label: '미납액',
+          label: '누적 미납액',
           data: outs,
           fill: false,
           borderColor: 'rgba(255, 159, 64, 1)',
@@ -313,8 +327,10 @@ async function loadLedgerChart() {
       plugins: {
         legend: { position: 'bottom' },
         tooltip: {
-          callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.formattedValue}원` }
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${ctx.formattedValue}원`
           }
+        }
       }
     };
 
