@@ -48,26 +48,32 @@ async function loadMembers() {
   }
 }
 
-// ---------- 현재 주차 출석 현황 ----------
 async function loadCurrentAttendance(){
   const tbody = document.querySelector('#currentWeekBody');
   const label = document.querySelector('#curWeekLabel');
   const bar = document.querySelector('#currentProgressBar');
 
-  // 현황 카드가 없는 페이지면 무시
   if (!tbody || !label || !bar) return;
 
   tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted">로딩 중…</td></tr>`;
   try{
     const data = await fetchJSON('/api/attendance/current');
-
     label.textContent = `${fmtWeekId(data.weekId)} · ${data.start} ~ ${data.end}` + (data.finalized ? ' (마감됨)' : '');
 
-    const total = Number(data.totalMembers || 0);
-    const checked = Number(data.checkedIn || 0);
-    const pct = total > 0 ? Math.round(checked * 100 / total) : 0;
+    const requiredPerMember = Number(data.requiredPerMember || 5);
+    const totalSlots = Number(
+      data.totalSlots ??
+      ((data.totalMembers || 0) * requiredPerMember)
+    );
+
+    const filledSlots = Number(data.filledSlots ?? 0); // 실제 출석일 총합
+
+    const pct = totalSlots > 0
+      ? Math.round((filledSlots * 100) / totalSlots)
+      : 0;
+
     bar.style.width = `${pct}%`;
-    bar.textContent = `${checked} / ${total} (${pct}%)`;
+    bar.textContent = `${filledSlots} / ${totalSlots} (${pct}%)`;
 
     const rows = data.list || [];
     if (!rows.length){
@@ -139,17 +145,12 @@ async function handleCheckin() {
   }
 }
 
-// ---------- 초기 구동 ----------
 window.addEventListener('DOMContentLoaded', async () => {
   await loadWeekInfo();
   await loadMembers();
   $('#checkinBtn').addEventListener('click', handleCheckin);
 
-  // [NEW] 현재 주차 현황 로드 & 새로고침 버튼
   const refreshBtn = document.querySelector('#refreshCurrentBtn');
   if (refreshBtn) refreshBtn.addEventListener('click', loadCurrentAttendance);
   loadCurrentAttendance();
-
-  // (선택) 30초 자동 새로고침
-  // setInterval(loadCurrentAttendance, 30000);
 });

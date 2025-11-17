@@ -388,7 +388,6 @@ app.get('/api/attendance/current', async (req, res) => {
     scanArray(wdata.logs);
 
     // ---------- 2) 맵 기반 구조 스캔 ----------
-    // perMemberDates / perMemberDays / memberDates: { memberId: ['2025-11-03', ...] } 또는 { memberId: { '2025-11-03': true, ... } }
     const scanMemberDatesMap = (obj) => {
       if (!obj || typeof obj !== 'object') return;
       for (const [mid, v] of Object.entries(obj)) {
@@ -405,7 +404,6 @@ app.get('/api/attendance/current', async (req, res) => {
     scanMemberDatesMap(wdata.perMemberDays);
     scanMemberDatesMap(wdata.memberDates);
 
-    // byDate: { '2025-11-03': ['u01','u02'] } 혹은 { '2025-11-03': { u01:true, u02:true } }
     const scanByDate = (obj) => {
       if (!obj || typeof obj !== 'object') return;
       for (const [k, v] of Object.entries(obj)) {
@@ -421,7 +419,6 @@ app.get('/api/attendance/current', async (req, res) => {
     scanByDate(wdata.byDate);
 
     // ---------- 3) 카운트 필드 계열 ----------
-    // perMember / perMemberCount / counts: { memberId: number }
     const getCountFromAny = (obj, mid) => {
       if (!obj || typeof obj !== 'object') return 0;
       const v = obj[mid];
@@ -441,10 +438,8 @@ app.get('/api/attendance/current', async (req, res) => {
       const fromCounts = getCountFromAny(countsCandidate, id);
       const fromRaw = rawCountMap.get(id) || 0;
 
-      // ✅ 주(週) 출석은 "고유 날짜 수"가 가장 신뢰 높음
       const bestDates = fromDates;
       const bestNumeric = Math.max(fromPerMember, fromCounts, fromRaw);
-
       const count = Math.max(bestDates, bestNumeric);
       const lastCheckedAt = dates.length ? dates[dates.length - 1] : null;
 
@@ -459,6 +454,14 @@ app.get('/api/attendance/current', async (req, res) => {
 
     const checkedIn = list.filter(x => (x.count || 0) > 0).length;
 
+    // ★ 여기서부터 새로 추가되는 부분
+    const REQUIRED_DAYS = 5;                               // 1인당 주 목표 출석일
+    const totalSlots = members.length * REQUIRED_DAYS;     // 전체 필요한 출석 슬롯 수 (예: 6 * 5 = 30)
+    const filledSlots = list.reduce(                      // 실제 채워진 출석 슬롯 수
+      (sum, m) => sum + (m.count || 0),
+      0
+    );
+
     res.set('Cache-Control', 'no-store');
     res.json({
       weekId,
@@ -466,7 +469,10 @@ app.get('/api/attendance/current', async (req, res) => {
       end: wdata.end,
       finalized: !!wdata.finalized,
       totalMembers: members.length,
-      checkedIn,
+      checkedIn,               // (원래 쓰던 값, 필요하면 계속 써도 됨)
+      requiredPerMember: REQUIRED_DAYS,  // 새 필드
+      totalSlots,              // 새 필드 (분모)
+      filledSlots,             // 새 필드 (분자)
       list
     });
   } catch (err) {
