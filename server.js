@@ -62,56 +62,61 @@ app.post('/api/finalize', authAdmin, async (req, res) => {
       start,
       end,
       checkins: [],
-      finalized: false
+      finalized: false,
     });
-    if (week.finalized)
-      return res.json({ ok: true, message: 'already finalized' });
+    if (week.finalized) {
+      return res.json({ ok: true, message: 'already finalized', weekId });
+    }
 
-    // ===== 멤버 목록 =====
+    // ===== 멤버 목록 로드 =====
     let membersData = await readJson('data/members.json', { members: [] });
-    // ✅ members.json 구조가 { members: [...] } 이든 그냥 배열이든 둘 다 처리
+    // members.json 이 배열이든 { members: [...] } 이든 모두 처리
     let members = Array.isArray(membersData)
       ? membersData
       : (membersData.members || []);
-    members = members.filter(m => m.active !== false);
+    members = members.filter((m) => m.active !== false);
 
-    // ===== 멤버별 출석일 집계 =====
+    // ===== 멤버별 출석일 집계 (고유 날짜 기준) =====
     const unique = new Set(
-      week.checkins.map(c => `${c.memberId}|${c.date.slice(0, 10)}`)
+      week.checkins.map((c) => `${c.memberId}|${c.date.slice(0, 10)}`)
     );
     const counts = {};
-    unique.forEach(k => {
+    unique.forEach((k) => {
       const [mid] = k.split('|');
       counts[mid] = (counts[mid] || 0) + 1;
     });
 
-    // ===== ledger 읽기 =====
+    // ===== 기존 ledger 로드 =====
     const ledger = await readJson('data/ledger.json', { entries: [] });
 
-    // ===== 각 멤버 벌금 계산 =====
-    members.forEach(m => {
+    // 1인당 요구 출석일 (지금 기준: 5회)
+    const REQUIRED_DAYS = 5;
+    const finalizedAt = new Date().toISOString();
+
+    // ===== 모든 멤버에 대해 엔트리 생성 (벌금 0도 포함) =====
+    for (const m of members) {
       const count = counts[m.id] || 0;
-      const deficit = Math.max(0, 5 - count);
-      if (deficit > 0) {
-        ledger.entries.push({
-          weekId,
-          memberId: m.id,
-          deficit,
-          fine: deficit * 10000,
-          finalizedAt: new Date().toISOString()
-        });
-      }
-    });
+      const deficit = Math.max(0, REQUIRED_DAYS - count);
+      const fine = deficit * 10000;
+
+      ledger.entries.push({
+        weekId,
+        memberId: m.id,
+        deficit,
+        fine,
+        finalizedAt,
+      });
+    }
 
     // ===== 파일 저장 =====
     week.finalized = true;
     await writeJson(weekPath, week);
     await writeJson('data/ledger.json', ledger);
 
-    res.json({ ok: true, message: 'week finalized', weekId });
+    return res.json({ ok: true, message: 'week finalized', weekId });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'internal error' });
+    return res.status(500).json({ error: 'internal error' });
   }
 });
 
