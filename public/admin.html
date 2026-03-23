@@ -112,27 +112,15 @@
         <div class="modal-body">
           <form id="payForm">
             <input type="hidden" id="payMemberId">
-            <input type="hidden" id="payWeekId">
+
             <div class="mb-3">
               <label class="form-label">이름</label>
               <input id="payMemberName" class="form-control" type="text" readonly>
             </div>
+
             <div class="mb-3">
               <label class="form-label">납부 금액(원)</label>
               <input id="payAmount" class="form-control" type="number" min="1" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">납부 방법</label>
-              <select id="payMethod" class="form-select" required>
-                <option value="">선택...</option>
-                <option value="cash">현금</option>
-                <option value="transfer">이체</option>
-                <option value="other">기타</option>
-              </select>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">비고</label>
-              <input id="payNote" class="form-control" type="text" placeholder="(선택)">
             </div>
           </form>
         </div>

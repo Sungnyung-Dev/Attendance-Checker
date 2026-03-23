@@ -10,16 +10,22 @@ async function fetchJSON(url, opts = {}) {
   }
   return data;
 }
-function $(sel) { return document.querySelector(sel); }
+
+function $(sel) {
+  return document.querySelector(sel);
+}
+
 function setAlert(type, msg) {
   const box = $('#result');
   box.className = `alert alert-${type}`;
   box.textContent = msg;
   box.classList.remove('d-none');
 }
+
 function getToken() {
   return localStorage.getItem('eco_admin_token') || '';
 }
+
 function setToken(v) {
   localStorage.setItem('eco_admin_token', v || '');
 }
@@ -32,7 +38,9 @@ function fmtWeekId(id) {
 
 // 금액 포맷
 const KRW = new Intl.NumberFormat('ko-KR');
-function fmtWon(n) { return KRW.format(Number(n) || 0) + '원'; }
+function fmtWon(n) {
+  return KRW.format(Number(n) || 0) + '원';
+}
 
 // ===== 데이터 캐시 =====
 let memberMap = null; // { id -> name }
@@ -41,7 +49,9 @@ async function ensureMemberMap() {
   try {
     const list = await fetchJSON('/api/members');
     memberMap = {};
-    list.forEach(m => (memberMap[m.id] = m.name || m.id));
+    list.forEach(m => {
+      memberMap[m.id] = m.name || m.id;
+    });
   } catch {
     memberMap = {};
   }
@@ -80,9 +90,10 @@ async function finalizeWeek() {
     } else {
       setAlert('success', `마감 완료! (${fmtWeekId(res.weekId)})`);
     }
+
     await loadWeek();
-    await loadMemberSummary(); // 마감 후 표 갱신
-    await loadLedgerChart();   // 차트 갱신
+    await loadMemberSummary();
+    await loadLedgerChart();
   } catch (e) {
     setAlert('danger', e.message || '마감 실패');
   } finally {
@@ -93,7 +104,6 @@ async function finalizeWeek() {
 // ===== 멤버별 합계 표 =====
 async function loadMemberSummary() {
   const tbody = $('#memberSummaryBody');
-  // 🔹 열 6개(멤버, 결손, 벌금, 납부액, 미납액, 상태)
   tbody.innerHTML =
     `<tr><td colspan="6" class="text-center text-muted">로딩 중…</td></tr>`;
 
@@ -117,8 +127,10 @@ async function loadMemberSummary() {
       return;
     }
 
-    // 합계
-    let sDef = 0, sFine = 0, sPaid = 0, sOut = 0;
+    let sDef = 0;
+    let sFine = 0;
+    let sPaid = 0;
+    let sOut = 0;
 
     const trs = rows
       .map(r => {
@@ -129,14 +141,12 @@ async function loadMemberSummary() {
         sPaid += r.totalPaid || 0;
         sOut += r.outstanding || 0;
 
-        // 미납이면: [납부] + [내역], 완납이면: 뱃지
         const statusCell = r.fullyPaid
           ? `<span class="badge text-bg-success">완납</span>`
           : `<div class="d-flex gap-1">
                <button class="btn btn-warning btn-sm pay-btn"
                        title="납부 입력"
-                       data-member="${r.memberId}"
-                       data-weeks="${(r.weeks || []).join(',')}">납부</button>
+                       data-member="${r.memberId}">납부</button>
                <button class="btn btn-outline-secondary btn-sm log-btn"
                        data-member="${r.memberId}">내역</button>
              </div>`;
@@ -156,7 +166,6 @@ async function loadMemberSummary() {
 
     tbody.innerHTML = trs;
 
-    // 합계 표시
     $('#sumDeficit').textContent = sDef;
     $('#sumFine').textContent = fmtWon(sFine);
     $('#sumPaid').textContent = fmtWon(sPaid);
@@ -171,17 +180,12 @@ async function loadMemberSummary() {
 let payModal = null;
 let paymentLogModal = null;
 
-function openPayModal(memberId, weeksCsv) {
-  const weeks = (weeksCsv || '').split(',').filter(Boolean);
-  const weekId = weeks.at(-1) || ''; // 가장 최근 주차 (원본 weekId 사용)
+function openPayModal(memberId) {
   const name = memberMap?.[memberId] || memberId;
 
   $('#payMemberId').value = memberId;
   $('#payMemberName').value = name;
-  $('#payWeekId').value = weekId;
   $('#payAmount').value = '';
-  $('#payMethod').value = '';
-  $('#payNote').value = '';
 
   payModal.show();
 }
@@ -192,13 +196,10 @@ async function submitPayment() {
     if (!token) throw new Error('관리자 토큰이 없습니다.');
 
     const memberId = $('#payMemberId').value;
-    const weekId = $('#payWeekId').value;
     const paidAmount = Number($('#payAmount').value);
-    const method = $('#payMethod').value;
-    const note = $('#payNote').value;
 
-    if (!weekId || !memberId || !paidAmount || !method) {
-      alert('모든 필드를 입력하세요.');
+    if (!memberId || !paidAmount) {
+      alert('납부 금액을 입력하세요.');
       return;
     }
 
@@ -208,15 +209,23 @@ async function submitPayment() {
         'Content-Type': 'application/json',
         'x-admin-token': token
       },
-      body: JSON.stringify({ weekId, memberId, paidAmount, method, note })
+      body: JSON.stringify({ memberId, paidAmount })
     });
 
+    const appliedText =
+      Array.isArray(res.allocations) && res.allocations.length
+        ? res.allocations
+            .map(a => `${fmtWeekId(a.weekId)}: ${fmtWon(a.appliedAmount)}`)
+            .join('\n')
+        : '배분 내역 없음';
+
     alert(
-      `납부 완료!\n총 납부액: ${res.totalPaid.toLocaleString()}원\n미납액: ${res.outstanding.toLocaleString()}원`
+      `납부 완료!\n\n배분 내역:\n${appliedText}\n\n남은 총 미납액: ${fmtWon(res.memberOutstanding)}`
     );
+
     payModal.hide();
-    loadMemberSummary();
-    loadLedgerChart();
+    await loadMemberSummary();
+    await loadLedgerChart();
   } catch (err) {
     alert('납부 실패: ' + (err.message || '오류'));
   }
@@ -231,6 +240,7 @@ async function openPaymentLog(memberId) {
   try {
     const res = await fetchJSON('/api/ledger?memberId=' + memberId);
     const entries = res.entries || [];
+
     if (!entries.length) {
       $('#paymentLogBody').innerHTML =
         `<div class="text-center text-muted">${memberName}님의 납부 기록이 없습니다.</div>`;
@@ -242,21 +252,19 @@ async function openPaymentLog(memberId) {
       <thead><tr><th>주차</th><th>벌금</th><th>납부내역</th><th>총 납부액</th><th>미납</th></tr></thead><tbody>`;
 
     for (const e of entries) {
-      const pays = Array.isArray(e.payments)
+      const pays = Array.isArray(e.payments) && e.payments.length
         ? e.payments
             .map(
               p =>
-                `${fmtWon(p.amount)} (${p.method})<br><span class="text-muted small">${(p.paidAt || '').split('T')[0] || ''}</span>`
+                `${fmtWon(p.amount)}<br><span class="text-muted small">${(p.paidAt || '').split('T')[0] || ''}</span>`
             )
             .join('<hr class="my-1">')
         : '<span class="text-muted small">없음</span>';
 
       const totalPaid =
         e.totalPaid ??
-        (e.payments?.reduce(
-          (s, p) => s + (Number(p.amount) || 0),
-          0
-        ) || 0);
+        (e.payments?.reduce((s, p) => s + (Number(p.amount) || 0), 0) || 0);
+
       const outstanding =
         e.outstanding ??
         Math.max(0, (Number(e.fine) || 0) - totalPaid);
@@ -270,65 +278,53 @@ async function openPaymentLog(memberId) {
       </tr>`;
     }
 
-    html += '</tbody></table></div>';
+    html += `</tbody></table></div>`;
     $('#paymentLogBody').innerHTML = html;
   } catch (err) {
     $('#paymentLogBody').innerHTML =
-      `<div class="text-danger text-center">${err.message || '불러오기 실패'}</div>`;
+      `<div class="text-danger">불러오기 실패: ${err.message || '오류'}</div>`;
   }
 }
 
-// ===== 주차별 통계 차트 =====
+// ===== 주차별 차트 =====
 let ledgerChart = null;
 
 async function loadLedgerChart() {
-  const ctx = document.getElementById('ledgerChart');
-  if (!ctx) return;
-
   try {
     const data = await fetchJSON('/api/ledger?summary=week');
-    // weekId 오름차순 정렬
-    const rows = (data.rows || []).sort((a, b) =>
-      a.weekId > b.weekId ? 1 : -1
-    );
+    const rows = (data.rows || [])
+      .slice()
+      .sort((a, b) => (a.weekId > b.weekId ? 1 : -1));
 
     const labels = rows.map(r => fmtWeekId(r.weekId));
 
-    // 🔹 주차별 합계를 "누적"으로 변환
-    const fines = [];
-    const outs = [];
-    let cumFine = 0;
-    let cumOut = 0;
+    let accFine = 0;
+    let accOut = 0;
+    const cumFine = [];
+    const cumOut = [];
 
     for (const r of rows) {
-      const f = Number(r.totalFine || 0);
-      const o = Number(r.outstanding || 0);
-      cumFine += f;
-      cumOut += o;
-      fines.push(cumFine); // 누적 벌금
-      outs.push(cumOut); // 누적 미납액
+      accFine += Number(r.totalFine) || 0;
+      accOut += Number(r.outstanding) || 0;
+      cumFine.push(accFine);
+      cumOut.push(accOut);
     }
+
+    const ctx = document.getElementById('ledgerChart');
+    if (!ctx) return;
 
     const chartData = {
       labels,
       datasets: [
         {
           label: '누적 총 벌금',
-          data: fines,
-          fill: false,
-          borderColor: 'rgba(54, 162, 235, 1)',
-          backgroundColor: 'rgba(54, 162, 235, 0.3)',
-          tension: 0.2,
-          borderWidth: 2
+          data: cumFine,
+          tension: 0.25
         },
         {
           label: '누적 미납액',
-          data: outs,
-          fill: false,
-          borderColor: 'rgba(255, 159, 64, 1)',
-          backgroundColor: 'rgba(255, 159, 64, 0.3)',
-          tension: 0.2,
-          borderWidth: 2
+          data: cumOut,
+          tension: 0.25
         }
       ]
     };
@@ -338,17 +334,26 @@ async function loadLedgerChart() {
       scales: {
         y: {
           beginAtZero: true,
-          ticks: { callback: val => val.toLocaleString() + '원' },
-          title: { display: true, text: '금액(원)' }
+          ticks: {
+            callback: val => val.toLocaleString() + '원'
+          },
+          title: {
+            display: true,
+            text: '금액(원)'
+          }
         },
-        x: { title: { display: true, text: '주차' } }
+        x: {
+          title: {
+            display: true,
+            text: '주차'
+          }
+        }
       },
       plugins: {
         legend: { position: 'bottom' },
         tooltip: {
           callbacks: {
-            label: ctx =>
-              `${ctx.dataset.label}: ${ctx.formattedValue}원`
+            label: ctx => `${ctx.dataset.label}: ${ctx.formattedValue}원`
           }
         }
       }
@@ -367,18 +372,16 @@ async function loadLedgerChart() {
 
 // ===== 초기화 =====
 window.addEventListener('DOMContentLoaded', () => {
-  // 토큰 UI
   const input = $('#adminToken');
   input.value = getToken();
+
   $('#saveTokenBtn').addEventListener('click', () => {
     setToken(input.value.trim());
     setAlert('success', '토큰 저장 완료');
   });
 
-  // 주 정보
   loadWeek();
 
-  // 마감 버튼
   $('#finalizeBtn').addEventListener('click', () => {
     if (
       confirm(
@@ -389,32 +392,20 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 멤버별 요약
   loadMemberSummary();
-  $('#refreshMemberSummaryBtn').addEventListener(
-    'click',
-    loadMemberSummary
-  );
+  $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
 
-  // 모달 초기화
-  payModal = new bootstrap.Modal(
-    document.getElementById('payModal')
-  );
-  paymentLogModal = new bootstrap.Modal(
-    document.getElementById('paymentLogModal')
-  );
+  payModal = new bootstrap.Modal(document.getElementById('payModal'));
+  paymentLogModal = new bootstrap.Modal(document.getElementById('paymentLogModal'));
 
-  // 행 버튼들: 납부 / 내역
   document.body.addEventListener('click', e => {
     const payBtn = e.target.closest('.pay-btn');
     if (payBtn) {
-      openPayModal(
-        payBtn.dataset.member,
-        payBtn.dataset.weeks || ''
-      );
+      openPayModal(payBtn.dataset.member);
       return;
     }
+
     const logBtn = e.target.closest('.log-btn');
     if (logBtn) {
       openPaymentLog(logBtn.dataset.member);
@@ -422,10 +413,8 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 납부 저장
   $('#submitPayBtn').addEventListener('click', submitPayment);
 
-  // 차트
   loadLedgerChart();
   const btn = document.getElementById('refreshChartBtn');
   if (btn) btn.addEventListener('click', loadLedgerChart);

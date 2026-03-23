@@ -268,53 +268,95 @@ app.get('/api/ledger', async (req, res) => {
 
 app.post('/api/ledger/pay', authAdmin, async (req, res) => {
   try {
-    const { weekId, memberId, paidAmount, method, note } = req.body || {};
+    const { memberId, paidAmount } = req.body || {};
 
-    if (!weekId || !memberId) {
-      return res.status(400).json({ error: 'weekId and memberId are required' });
+    if (!memberId) {
+      return res.status(400).json({ error: 'memberId is required' });
     }
+
     const amount = Number(paidAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: 'paidAmount must be a positive number' });
     }
-    if (!method) {
-      return res.status(400).json({ error: 'method is required (e.g., cash, transfer)' });
-    }
 
     const ledger = await readJson('data/ledger.json', { entries: [] });
-    const entry = ledger.entries.find(e => e.weekId === weekId && e.memberId === memberId);
 
-    if (!entry) {
-      return res.status(404).json({ error: 'ledger entry not found (check weekId & memberId)' });
+    const memberEntries = (ledger.entries || [])
+      .filter(e => e.memberId === memberId)
+      .map(e => {
+        const fine = Number(e.fine) || 0;
+        const paid = Array.isArray(e.payments)
+          ? e.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+          : 0;
+        const outstanding = Math.max(0, fine - paid);
+        return { entry: e, fine, paid, outstanding };
+      })
+      .filter(x => x.outstanding > 0)
+      .sort((a, b) => (a.entry.weekId > b.entry.weekId ? 1 : -1)); // 오래된 주차부터
+
+    if (!memberEntries.length) {
+      return res.status(400).json({ error: '해당 멤버의 미납 내역이 없습니다.' });
     }
 
-    // payments 배열 초기화 후 결제 내역 추가
-    if (!Array.isArray(entry.payments)) entry.payments = [];
-    const payment = {
-      amount,
-      method,
-      note: note || '',
-      paidAt: new Date().toISOString()
-    };
-    entry.payments.push(payment);
+    const totalOutstanding = memberEntries.reduce((sum, x) => sum + x.outstanding, 0);
+    if (amount > totalOutstanding) {
+      return res.status(400).json({
+        error: `납부 금액이 총 미납액(${totalOutstanding.toLocaleString()}원)을 초과합니다.`
+      });
+    }
 
-    // 총 납부액 계산
-    const totalPaid = entry.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-    const fine = Number(entry.fine) || 0;
-    const outstanding = Math.max(0, fine - totalPaid);
-    const fullyPaid = outstanding === 0;
+    let remaining = amount;
+    const paidAt = new Date().toISOString();
+    const batchId = `pay_${Date.now()}_${memberId}`;
+    const allocations = [];
+
+    for (const item of memberEntries) {
+      if (remaining <= 0) break;
+
+      const appliedAmount = Math.min(item.outstanding, remaining);
+      if (appliedAmount <= 0) continue;
+
+      if (!Array.isArray(item.entry.payments)) item.entry.payments = [];
+      item.entry.payments.push({
+        amount: appliedAmount,
+        paidAt,
+        batchId
+      });
+
+      allocations.push({
+        weekId: item.entry.weekId,
+        appliedAmount
+      });
+
+      remaining -= appliedAmount;
+    }
 
     await writeJson('data/ledger.json', ledger);
 
+    const refreshedEntries = (ledger.entries || [])
+      .filter(e => e.memberId === memberId)
+      .map(e => {
+        const fine = Number(e.fine) || 0;
+        const totalPaid = Array.isArray(e.payments)
+          ? e.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+          : 0;
+        const outstanding = Math.max(0, fine - totalPaid);
+        return { fine, totalPaid, outstanding };
+      });
+
+    const memberTotalFine = refreshedEntries.reduce((sum, e) => sum + e.fine, 0);
+    const memberTotalPaid = refreshedEntries.reduce((sum, e) => sum + e.totalPaid, 0);
+    const memberOutstanding = refreshedEntries.reduce((sum, e) => sum + e.outstanding, 0);
+
     return res.json({
       ok: true,
-      weekId,
       memberId,
-      fine,
-      addedPayment: payment,
-      totalPaid,
-      outstanding,
-      fullyPaid
+      paidAmount: amount,
+      allocations,
+      memberTotalFine,
+      memberTotalPaid,
+      memberOutstanding,
+      fullyPaid: memberOutstanding === 0
     });
   } catch (err) {
     console.error(err);
