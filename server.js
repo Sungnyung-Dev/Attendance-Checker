@@ -89,15 +89,18 @@ app.post('/api/finalize', authAdmin, async (req, res) => {
     // ===== 기존 ledger 로드 =====
     const ledger = await readJson('data/ledger.json', { entries: [] });
 
-    // 1인당 요구 출석일 (지금 기준: 5회)
-    const REQUIRED_DAYS = 5;
+    // 1인당 요구 출석일: 주 4회
+    const REQUIRED_DAYS = 4;
     const finalizedAt = new Date().toISOString();
 
     // ===== 모든 멤버에 대해 엔트리 생성 (벌금 0도 포함) =====
+    // 규칙:
+    // - 4회 이상 출석: 벌금 0원
+    // - 4회 미만 출석: 부족 횟수와 관계없이 벌금 10000원
     for (const m of members) {
       const count = counts[m.id] || 0;
       const deficit = Math.max(0, REQUIRED_DAYS - count);
-      const fine = deficit * 10000;
+      const fine = count >= REQUIRED_DAYS ? 0 : 10000;
 
       ledger.entries.push({
         weekId,
@@ -328,6 +331,7 @@ app.get('/api/attendance/current', async (req, res) => {
     const membersPath = path.resolve('data', 'members.json');
     const membersJson = JSON.parse(await fsp.readFile(membersPath, 'utf-8'));
     const members = Array.isArray(membersJson.members) ? membersJson.members : [];
+    const activeMembers = members.filter(m => m.active !== false);
 
     // 주 파일 로드 (없으면 기본형)
     const weekFile = path.resolve('data', `attendance-${weekId}.json`);
@@ -344,16 +348,17 @@ app.get('/api/attendance/current', async (req, res) => {
     const toDateStr = (v) => {
       if (typeof v === 'number') {
         const d = new Date(v);
-        if (!isNaN(d.getTime())) return d.toISOString().slice(0,10);
+        if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
       }
       if (typeof v === 'string' && v.trim()) {
         const s = v.trim();
         const m = s.match(/\d{4}-\d{2}-\d{2}/);
         if (m) return m[0];
-        if (s.length >= 10 && s[4] === '-' && s[7] === '-') return s.slice(0,10);
+        if (s.length >= 10 && s[4] === '-' && s[7] === '-') return s.slice(0, 10);
       }
       return '';
     };
+
     const getId = (obj) =>
       obj?.memberId || obj?.memberID || obj?.id || obj?.userId || obj?.userID || obj?.uid;
 
@@ -398,9 +403,15 @@ app.get('/api/attendance/current', async (req, res) => {
       for (const [mid, v] of Object.entries(obj)) {
         if (!dateMap.has(mid)) dateMap.set(mid, new Set());
         if (Array.isArray(v)) {
-          v.forEach(d => { const ds = toDateStr(d); if (ds) dateMap.get(mid).add(ds); });
+          v.forEach(d => {
+            const ds = toDateStr(d);
+            if (ds) dateMap.get(mid).add(ds);
+          });
         } else if (v && typeof v === 'object') {
-          Object.keys(v).forEach(k => { const ds = toDateStr(k); if (ds && v[k]) dateMap.get(mid).add(ds); });
+          Object.keys(v).forEach(k => {
+            const ds = toDateStr(k);
+            if (ds && v[k]) dateMap.get(mid).add(ds);
+          });
         }
       }
     };
@@ -417,10 +428,13 @@ app.get('/api/attendance/current', async (req, res) => {
         if (Array.isArray(v)) {
           v.forEach(mid => touch(mid, ds));
         } else if (v && typeof v === 'object') {
-          Object.entries(v).forEach(([mid, flag]) => { if (flag) touch(mid, ds); });
+          Object.entries(v).forEach(([mid, flag]) => {
+            if (flag) touch(mid, ds);
+          });
         }
       }
     };
+
     scanByDate(wdata.byDate);
 
     // ---------- 3) 카운트 필드 계열 ----------
@@ -434,7 +448,7 @@ app.get('/api/attendance/current', async (req, res) => {
     const perMember = wdata.perMember || {};
 
     // ---------- 4) 최종 리스트 ----------
-    const list = members.map(m => {
+    const list = activeMembers.map(m => {
       const id = m.id;
       const datesSet = dateMap.get(id) || new Set();
       const dates = Array.from(datesSet).sort();
@@ -459,11 +473,11 @@ app.get('/api/attendance/current', async (req, res) => {
 
     const checkedIn = list.filter(x => (x.count || 0) > 0).length;
 
-    // ★ 여기서부터 새로 추가되는 부분
-    const REQUIRED_DAYS = 5;                               // 1인당 주 목표 출석일
-    const totalSlots = members.length * REQUIRED_DAYS;     // 전체 필요한 출석 슬롯 수 (예: 6 * 5 = 30)
-    const filledSlots = list.reduce(                      // 실제 채워진 출석 슬롯 수
-      (sum, m) => sum + (m.count || 0),
+    // 진행 현황도 주 4회 기준으로 표시
+    const REQUIRED_DAYS = 4;
+    const totalSlots = activeMembers.length * REQUIRED_DAYS;
+    const filledSlots = list.reduce(
+      (sum, m) => sum + Math.min((m.count || 0), REQUIRED_DAYS),
       0
     );
 
@@ -473,11 +487,11 @@ app.get('/api/attendance/current', async (req, res) => {
       start: wdata.start,
       end: wdata.end,
       finalized: !!wdata.finalized,
-      totalMembers: members.length,
-      checkedIn,               // (원래 쓰던 값, 필요하면 계속 써도 됨)
-      requiredPerMember: REQUIRED_DAYS,  // 새 필드
-      totalSlots,              // 새 필드 (분모)
-      filledSlots,             // 새 필드 (분자)
+      totalMembers: activeMembers.length,
+      checkedIn,
+      requiredPerMember: REQUIRED_DAYS,
+      totalSlots,
+      filledSlots,
       list
     });
   } catch (err) {
