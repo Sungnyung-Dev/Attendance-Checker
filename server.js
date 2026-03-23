@@ -5,6 +5,9 @@ import { readJson, writeJson } from './utils/filedb.js';
 import { startAutoTasks } from './utils/auto.js';
 import { promises as fsp } from 'fs';
 import path from 'path';
+import dayjs from 'dayjs';
+import isoWeek from 'dayjs/plugin/isoWeek.js';
+dayjs.extend(isoWeek);
 
 const app = express();
 app.use(express.json());
@@ -50,6 +53,141 @@ const authAdmin = (req, res, next) => {
   }
   next();
 };
+
+function getWeekInfoFromDate(dateStr) {
+  const d = dayjs(dateStr);
+  if (!d.isValid()) throw new Error('invalid date');
+
+  const monday = d.startOf('isoWeek');
+  const sunday = d.endOf('isoWeek');
+
+  return {
+    weekId: `${monday.isoWeekYear()}-W${String(monday.isoWeek()).padStart(2, '0')}`,
+    start: monday.format('YYYY-MM-DD'),
+    end: sunday.format('YYYY-MM-DD')
+  };
+}
+
+function getWeekInfoFromWeekId(weekId) {
+  const m = /^(\d{4})-W(\d{1,2})$/.exec(weekId || '');
+  if (!m) throw new Error('invalid weekId');
+
+  const year = Number(m[1]);
+  const week = Number(m[2]);
+
+  if (!Number.isInteger(year) || !Number.isInteger(week) || week < 1 || week > 53) {
+    throw new Error('invalid weekId');
+  }
+
+  // ISO week 1은 1월 4일이 속한 주
+  const mondayOfWeek1 = dayjs(`${year}-01-04`).startOf('isoWeek');
+  const monday = mondayOfWeek1.add(week - 1, 'week');
+  const sunday = monday.endOf('isoWeek');
+
+  return {
+    weekId: `${monday.isoWeekYear()}-W${String(monday.isoWeek()).padStart(2, '0')}`,
+    start: monday.format('YYYY-MM-DD'),
+    end: sunday.format('YYYY-MM-DD')
+  };
+}
+
+function normalizeCheckinDate(v) {
+  if (!v) return '';
+  const s = String(v);
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : '';
+}
+
+async function loadActiveMembers() {
+  const membersData = await readJson('data/members.json', { members: [] });
+  const members = Array.isArray(membersData)
+    ? membersData
+    : (membersData.members || []);
+  return members.filter(m => m.active !== false);
+}
+
+async function loadWeekAttendanceByWeekId(weekId, fallbackStart, fallbackEnd) {
+  const weekPath = getWeekFilePath(weekId);
+  const week = await readJson(weekPath, {
+    weekId,
+    start: fallbackStart,
+    end: fallbackEnd,
+    checkins: [],
+    finalized: false
+  });
+
+  if (!Array.isArray(week.checkins)) week.checkins = [];
+  if (!week.start) week.start = fallbackStart;
+  if (!week.end) week.end = fallbackEnd;
+  if (typeof week.finalized !== 'boolean') week.finalized = false;
+
+  return { week, weekPath };
+}
+
+function hasCheckinOnDate(week, memberId, dateStr) {
+  return (week.checkins || []).some(c =>
+    c.memberId === memberId && normalizeCheckinDate(c.date) === dateStr
+  );
+}
+
+function addExcusedCheckin(week, memberId, dateStr) {
+  if (!Array.isArray(week.checkins)) week.checkins = [];
+  if (hasCheckinOnDate(week, memberId, dateStr)) return false;
+
+  week.checkins.push({
+    memberId,
+    date: `${dateStr}T00:00:00.000+09:00`,
+    excused: true,
+    source: 'admin'
+  });
+  return true;
+}
+
+function countUniqueAttendanceDays(week, memberId) {
+  const dates = new Set(
+    (week.checkins || [])
+      .filter(c => c.memberId === memberId)
+      .map(c => normalizeCheckinDate(c.date))
+      .filter(Boolean)
+  );
+  return dates.size;
+}
+
+async function recalcLedgerForWeek(weekId, week) {
+  const ledger = await readJson('data/ledger.json', { entries: [] });
+  const members = await loadActiveMembers();
+
+  const REQUIRED_DAYS = 4;
+  const finalizedAt = new Date().toISOString();
+
+  for (const m of members) {
+    const count = countUniqueAttendanceDays(week, m.id);
+    const deficit = Math.max(0, REQUIRED_DAYS - count);
+    const fine = count >= REQUIRED_DAYS ? 0 : 10000;
+
+    const existing = (ledger.entries || []).find(
+      e => e.weekId === weekId && e.memberId === m.id
+    );
+
+    if (existing) {
+      existing.deficit = deficit;
+      existing.fine = fine;
+      existing.finalizedAt = existing.finalizedAt || finalizedAt;
+      if (!Array.isArray(existing.payments)) existing.payments = [];
+    } else {
+      ledger.entries.push({
+        weekId,
+        memberId: m.id,
+        deficit,
+        fine,
+        finalizedAt,
+        payments: []
+      });
+    }
+  }
+
+  await writeJson('data/ledger.json', ledger);
+}
 
 // POST /api/finalize  : 주간 마감
 app.post('/api/finalize', authAdmin, async (req, res) => {
@@ -538,6 +676,105 @@ app.get('/api/attendance/current', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'failed to load current attendance' });
+  }
+});
+
+app.post('/api/admin/attendance/excuse', authAdmin, async (req, res) => {
+  try {
+    const { memberId, date } = req.body || {};
+
+    if (!memberId || !date) {
+      return res.status(400).json({ error: 'memberId and date are required' });
+    }
+
+    const members = await loadActiveMembers();
+    const member = members.find(m => m.id === memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const info = getWeekInfoFromDate(date);
+    const { week, weekPath } = await loadWeekAttendanceByWeekId(
+      info.weekId,
+      info.start,
+      info.end
+    );
+
+    const added = addExcusedCheckin(week, memberId, date);
+
+    await writeJson(weekPath, week);
+
+    let ledgerRecalculated = false;
+    if (week.finalized) {
+      await recalcLedgerForWeek(info.weekId, week);
+      ledgerRecalculated = true;
+    }
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      date,
+      added,
+      finalized: !!week.finalized,
+      ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/attendance/excuse-week', authAdmin, async (req, res) => {
+  try {
+    const { weekId } = req.body || {};
+
+    if (!weekId) {
+      return res.status(400).json({ error: 'weekId is required' });
+    }
+
+    const info = getWeekInfoFromWeekId(weekId);
+    const { week, weekPath } = await loadWeekAttendanceByWeekId(
+      info.weekId,
+      info.start,
+      info.end
+    );
+
+    const members = await loadActiveMembers();
+
+    const monday = dayjs(info.start);
+    const targetDates = [0, 1, 2, 3, 4].map(offset =>
+      monday.add(offset, 'day').format('YYYY-MM-DD')
+    );
+
+    let addedCount = 0;
+
+    for (const m of members) {
+      for (const dateStr of targetDates) {
+        const added = addExcusedCheckin(week, m.id, dateStr);
+        if (added) addedCount += 1;
+      }
+    }
+
+    await writeJson(weekPath, week);
+
+    let ledgerRecalculated = false;
+    if (week.finalized) {
+      await recalcLedgerForWeek(info.weekId, week);
+      ledgerRecalculated = true;
+    }
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      dates: targetDates,
+      addedCount,
+      finalized: !!week.finalized,
+      ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
   }
 });
 

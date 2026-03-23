@@ -1,6 +1,5 @@
 // /public/js/admin.js
 
-// ===== 공통 헬퍼 =====
 async function fetchJSON(url, opts = {}) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
@@ -30,20 +29,17 @@ function setToken(v) {
   localStorage.setItem('eco_admin_token', v || '');
 }
 
-// 주차 표시 포맷: "YYYY-W05"
 function fmtWeekId(id) {
   const m = /^(\d{4})-W(\d{1,2})$/.exec(id || '');
   return m ? `${m[1]}-W${m[2].padStart(2, '0')}` : (id || '');
 }
 
-// 금액 포맷
 const KRW = new Intl.NumberFormat('ko-KR');
 function fmtWon(n) {
   return KRW.format(Number(n) || 0) + '원';
 }
 
-// ===== 데이터 캐시 =====
-let memberMap = null; // { id -> name }
+let memberMap = null;
 async function ensureMemberMap() {
   if (memberMap) return memberMap;
   try {
@@ -58,19 +54,64 @@ async function ensureMemberMap() {
   return memberMap;
 }
 
-// ===== 현재 주 정보 =====
 async function loadWeek() {
   try {
     const info = await fetchJSON('/api/week');
     $('#weekInfo').textContent =
       `${fmtWeekId(info.weekId)} · ${info.start} ~ ${info.end}` +
       (info.finalized ? ' (마감됨)' : '');
-  } catch (e) {
+
+    if (!$('#excuseDate').value) {
+      $('#excuseDate').value = info.start;
+    }
+  } catch {
     $('#weekInfo').textContent = '주 정보 로딩 실패';
   }
 }
 
-// ===== 주간 마감 =====
+async function loadExcuseControls() {
+  await ensureMemberMap();
+
+  try {
+    const members = await fetchJSON('/api/members');
+    const memberSel = $('#excuseMemberId');
+    memberSel.innerHTML = `<option value="">멤버를 선택하세요</option>`;
+    members.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = `${m.name || m.id} (${m.id})`;
+      memberSel.appendChild(opt);
+    });
+  } catch {
+    $('#excuseMemberId').innerHTML = `<option value="">멤버 불러오기 실패</option>`;
+  }
+
+  try {
+    const hist = await fetchJSON('/api/ledger?summary=week');
+    const weekSel = $('#excuseWeekId');
+
+    const weekIds = new Set((hist.rows || []).map(r => r.weekId));
+    const current = await fetchJSON('/api/week');
+    if (current?.weekId) weekIds.add(current.weekId);
+
+    const sorted = Array.from(weekIds).sort((a, b) => (a > b ? -1 : 1));
+
+    weekSel.innerHTML = `<option value="">주차를 선택하세요</option>`;
+    sorted.forEach(weekId => {
+      const opt = document.createElement('option');
+      opt.value = weekId;
+      opt.textContent = fmtWeekId(weekId);
+      weekSel.appendChild(opt);
+    });
+
+    if (current?.weekId) {
+      weekSel.value = current.weekId;
+    }
+  } catch {
+    $('#excuseWeekId').innerHTML = `<option value="">주차 불러오기 실패</option>`;
+  }
+}
+
 async function finalizeWeek() {
   const btn = $('#finalizeBtn');
   btn.disabled = true;
@@ -92,6 +133,7 @@ async function finalizeWeek() {
     }
 
     await loadWeek();
+    await loadExcuseControls();
     await loadMemberSummary();
     await loadLedgerChart();
   } catch (e) {
@@ -101,7 +143,80 @@ async function finalizeWeek() {
   }
 }
 
-// ===== 멤버별 합계 표 =====
+async function approveSingleAttendance() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#excuseMemberId').value;
+    const date = $('#excuseDate').value;
+
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!date) throw new Error('날짜를 선택하세요.');
+
+    const name = memberMap?.[memberId] || memberId;
+
+    const res = await fetchJSON('/api/admin/attendance/excuse', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, date })
+    });
+
+    const addedText = res.added ? '출석 1건이 추가되었습니다.' : '이미 출석 처리된 날짜입니다.';
+    const recalcText = res.ledgerRecalculated ? ' 마감된 주차라 정산도 다시 계산했습니다.' : '';
+
+    setAlert(
+      'success',
+      `${name} · ${date} · ${addedText}${recalcText}`
+    );
+
+    await loadWeek();
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '출석 인정 실패');
+  }
+}
+
+async function approveWholeWeek() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const weekId = $('#excuseWeekId').value;
+    if (!weekId) throw new Error('주차를 선택하세요.');
+
+    const ok = confirm(`${fmtWeekId(weekId)}의 월~금 전체 멤버 출석을 인정하시겠습니까?`);
+    if (!ok) return;
+
+    const res = await fetchJSON('/api/admin/attendance/excuse-week', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ weekId })
+    });
+
+    const recalcText = res.ledgerRecalculated ? ' 정산도 다시 계산했습니다.' : '';
+    setAlert(
+      'success',
+      `${fmtWeekId(weekId)} · 총 ${res.addedCount || 0}건의 출석을 추가했습니다.${recalcText}`
+    );
+
+    await loadWeek();
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '시험 주간 출석 인정 실패');
+  }
+}
+
 async function loadMemberSummary() {
   const tbody = $('#memberSummaryBody');
   tbody.innerHTML =
@@ -176,7 +291,6 @@ async function loadMemberSummary() {
   }
 }
 
-// ===== 납부 입력 / 납부 내역 모달 =====
 let payModal = null;
 let paymentLogModal = null;
 
@@ -286,7 +400,6 @@ async function openPaymentLog(memberId) {
   }
 }
 
-// ===== 주차별 차트 =====
 let ledgerChart = null;
 
 async function loadLedgerChart() {
@@ -370,8 +483,7 @@ async function loadLedgerChart() {
   }
 }
 
-// ===== 초기화 =====
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   const input = $('#adminToken');
   input.value = getToken();
 
@@ -379,8 +491,6 @@ window.addEventListener('DOMContentLoaded', () => {
     setToken(input.value.trim());
     setAlert('success', '토큰 저장 완료');
   });
-
-  loadWeek();
 
   $('#finalizeBtn').addEventListener('click', () => {
     if (
@@ -392,7 +502,9 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  loadMemberSummary();
+  $('#approveSingleBtn').addEventListener('click', approveSingleAttendance);
+  $('#approveWeekBtn').addEventListener('click', approveWholeWeek);
+
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
 
@@ -415,7 +527,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   $('#submitPayBtn').addEventListener('click', submitPayment);
 
-  loadLedgerChart();
-  const btn = document.getElementById('refreshChartBtn');
-  if (btn) btn.addEventListener('click', loadLedgerChart);
+  await loadWeek();
+  await loadExcuseControls();
+  await loadMemberSummary();
+  await loadLedgerChart();
 });
