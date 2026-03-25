@@ -39,6 +39,14 @@ function fmtWon(n) {
   return KRW.format(Number(n) || 0) + '원';
 }
 
+function getTodayLocalDateString() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 let memberMap = null;
 async function ensureMemberMap() {
   if (memberMap) return memberMap;
@@ -61,11 +69,10 @@ async function loadWeek() {
       `${fmtWeekId(info.weekId)} · ${info.start} ~ ${info.end}` +
       (info.finalized ? ' (마감됨)' : '');
 
-    if (!$('#excuseDate').value) {
-      $('#excuseDate').value = info.start;
-    }
+    $('#excuseDate').value = getTodayLocalDateString();
   } catch {
     $('#weekInfo').textContent = '주 정보 로딩 실패';
+    $('#excuseDate').value = getTodayLocalDateString();
   }
 }
 
@@ -179,6 +186,49 @@ async function approveSingleAttendance() {
     await loadLedgerChart();
   } catch (err) {
     setAlert('danger', err.message || '출석 인정 실패');
+  }
+}
+
+async function cancelSingleAttendance() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#excuseMemberId').value;
+    const date = $('#excuseDate').value;
+
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!date) throw new Error('날짜를 선택하세요.');
+
+    const name = memberMap?.[memberId] || memberId;
+
+    const ok = confirm(`${name}의 ${date} 출석을 취소하시겠습니까?`);
+    if (!ok) return;
+
+    const res = await fetchJSON('/api/admin/attendance/cancel', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, date })
+    });
+
+    const removedText = res.removed
+      ? '출석 1건을 취소했습니다.'
+      : '해당 날짜의 출석 기록이 없었습니다.';
+    const recalcText = res.ledgerRecalculated
+      ? ' 마감된 주차라 정산도 다시 계산했습니다.'
+      : '';
+
+    setAlert('warning', `${name} · ${date} · ${removedText}${recalcText}`);
+
+    await loadWeek();
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '출석 취소 실패');
   }
 }
 
@@ -503,6 +553,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
 
   $('#approveSingleBtn').addEventListener('click', approveSingleAttendance);
+  $('#cancelSingleBtn').addEventListener('click', cancelSingleAttendance);
   $('#approveWeekBtn').addEventListener('click', approveWholeWeek);
 
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);

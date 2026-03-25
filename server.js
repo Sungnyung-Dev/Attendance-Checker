@@ -143,6 +143,21 @@ function addExcusedCheckin(week, memberId, dateStr) {
   return true;
 }
 
+function removeCheckinOnDate(week, memberId, dateStr) {
+  if (!Array.isArray(week.checkins)) week.checkins = [];
+
+  const before = week.checkins.length;
+
+  week.checkins = week.checkins.filter(c => {
+    return !(
+      c.memberId === memberId &&
+      normalizeCheckinDate(c.date) === dateStr
+    );
+  });
+
+  return before !== week.checkins.length;
+}
+
 function countUniqueAttendanceDays(week, memberId) {
   const dates = new Set(
     (week.checkins || [])
@@ -716,6 +731,52 @@ app.post('/api/admin/attendance/excuse', authAdmin, async (req, res) => {
       memberId,
       date,
       added,
+      finalized: !!week.finalized,
+      ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/attendance/cancel', authAdmin, async (req, res) => {
+  try {
+    const { memberId, date } = req.body || {};
+
+    if (!memberId || !date) {
+      return res.status(400).json({ error: 'memberId and date are required' });
+    }
+
+    const members = await loadActiveMembers();
+    const member = members.find(m => m.id === memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const info = getWeekInfoFromDate(date);
+    const { week, weekPath } = await loadWeekAttendanceByWeekId(
+      info.weekId,
+      info.start,
+      info.end
+    );
+
+    const removed = removeCheckinOnDate(week, memberId, date);
+
+    await writeJson(weekPath, week);
+
+    let ledgerRecalculated = false;
+    if (week.finalized) {
+      await recalcLedgerForWeek(info.weekId, week);
+      ledgerRecalculated = true;
+    }
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      date,
+      removed,
       finalized: !!week.finalized,
       ledgerRecalculated
     });
