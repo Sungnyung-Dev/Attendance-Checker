@@ -93,7 +93,7 @@ async function loadCurrentAttendance(){
           <td>${r.name} <span class="text-muted small">(${r.id})</span></td>
           <td>${r.count ?? 0}회 ${badge}</td>
           <td>${r.lastCheckedAt || '-'}</td>
-          <td class="small text-muted">${dates}</td>
+          <td class="small text-muted d-none d-md-table-cell">${dates}</td>
         </tr>
       `;
     }).join('');
