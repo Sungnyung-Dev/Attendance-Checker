@@ -20,7 +20,8 @@ const members = [
   { id: 'u11', name: '조재영', active: true },
   { id: 'u12', name: '천지훈', active: true },
   { id: 'u13', name: '황동하', active: true },
-  { id: 'u14', name: '김이열', active: true }
+  { id: 'u14', name: '김이열', active: true },
+  { id: 'u15', name: '송윤수', active: true}
 ];
 
 fs.writeFileSync(membersPath, JSON.stringify({ members }, null, 2));
