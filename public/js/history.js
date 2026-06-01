@@ -94,11 +94,15 @@ async function loadWeekDetail(weekId){
       const status = r.fullyPaid
         ? `<span class="badge text-bg-success">완납</span>`
         : `<span class="badge text-bg-warning">미납</span>`;
+      const fineBadges = [
+        (Number(r.totalExtraFine) || 0) > 0 ? `<span class="badge text-bg-warning">추가 ${fmtWon(r.totalExtraFine)}</span>` : '',
+        (Number(r.passUsedInRows) || 0) > 0 ? `<span class="badge text-bg-success">까방권</span>` : ''
+      ].filter(Boolean).join(' ');
       return `
         <tr>
           <td>${name} <span class="text-muted small">(${r.memberId})</span></td>
           <td>${r.totalDeficit ?? 0}</td>
-          <td>${fmtWon(r.totalFine)}</td>
+          <td>${fmtWon(r.totalFine)}${fineBadges ? `<br>${fineBadges}` : ''}</td>
           <td>${fmtWon(r.totalPaid)}</td>
           <td>${fmtWon(r.outstanding)}</td>
           <td>${status}</td>
@@ -122,16 +126,19 @@ async function loadWeekDetail(weekId){
 
 // ---- CSV export ----
 function rowsToCSV(rows){
-  const header = ['memberId','name','totalDeficit','totalFine','totalPaid','outstanding','fullyPaid'];
+  const header = ['memberId','name','totalDeficit','totalAttendanceFine','totalExtraFine','totalFine','totalPaid','outstanding','passUsedInRows','fullyPaid'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
     const line = [
       r.memberId,
       (memberMap?.[r.memberId]||'').replaceAll(',',' '),
       r.totalDeficit||0,
+      r.totalAttendanceFine||0,
+      r.totalExtraFine||0,
       r.totalFine||0,
       r.totalPaid||0,
       r.outstanding||0,
+      r.passUsedInRows||0,
       r.fullyPaid ? 'Y':'N'
     ].join(',');
     lines.push(line);

@@ -16,6 +16,8 @@ app.use(express.static('public'));
 dotenv.config();
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const REQUIRED_DAYS = 4;
+const PASS_LIMIT = 3;
 
 // 멤버별 금주 고유 출석일 수 집계
 app.get('/api/week', async (req, res) => {
@@ -158,6 +160,22 @@ function removeCheckinOnDate(week, memberId, dateStr) {
   return before !== week.checkins.length;
 }
 
+function removeCheckinsOnDates(week, memberId, dateStrs) {
+  if (!Array.isArray(week.checkins)) week.checkins = [];
+
+  const targetDates = new Set(dateStrs);
+  const before = week.checkins.length;
+
+  week.checkins = week.checkins.filter(c => {
+    return !(
+      c.memberId === memberId &&
+      targetDates.has(normalizeCheckinDate(c.date))
+    );
+  });
+
+  return before - week.checkins.length;
+}
+
 function countUniqueAttendanceDays(week, memberId) {
   const dates = new Set(
     (week.checkins || [])
@@ -168,36 +186,121 @@ function countUniqueAttendanceDays(week, memberId) {
   return dates.size;
 }
 
+function toMoney(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}
+
+function normalizeLedgerEntry(e) {
+  const extraFine = toMoney(e.extraFine);
+  const legacyFine = toMoney(e.fine);
+  const hasAttendanceFine = e.attendanceFine !== undefined && e.attendanceFine !== null;
+  const attendanceFine = hasAttendanceFine
+    ? toMoney(e.attendanceFine)
+    : Math.max(0, legacyFine - extraFine);
+  const passUsed = e.passUsed === true;
+  const fine = attendanceFine + extraFine;
+
+  return {
+    ...e,
+    attendanceFine,
+    extraFine,
+    extraFineReason: e.extraFineReason || '',
+    passUsed,
+    passUsedAt: passUsed ? (e.passUsedAt || null) : null,
+    fine
+  };
+}
+
+function applyLedgerFine(entry, attendanceFine, deficit) {
+  const normalized = normalizeLedgerEntry(entry);
+  const extraFine = normalized.extraFine;
+  const passUsed = normalized.passUsed;
+
+  entry.deficit = deficit;
+  entry.attendanceFine = passUsed ? 0 : attendanceFine;
+  entry.extraFine = extraFine;
+  entry.extraFineReason = normalized.extraFineReason;
+  entry.passUsed = passUsed;
+  entry.passUsedAt = passUsed ? normalized.passUsedAt : null;
+  entry.fine = entry.attendanceFine + entry.extraFine;
+  if (!Array.isArray(entry.payments)) entry.payments = [];
+
+  return entry;
+}
+
+function calculateAttendancePenalty(week, memberId) {
+  const count = countUniqueAttendanceDays(week, memberId);
+  const deficit = Math.max(0, REQUIRED_DAYS - count);
+  const attendanceFine = count >= REQUIRED_DAYS ? 0 : 10000;
+  return { count, deficit, attendanceFine };
+}
+
+async function validateActiveMember(memberId) {
+  const members = await loadActiveMembers();
+  const member = members.find(m => m.id === memberId);
+  if (!member) return null;
+  return member;
+}
+
+async function findOrCreateLedgerEntry(ledger, weekId, memberId) {
+  const info = getWeekInfoFromWeekId(weekId);
+  const { week } = await loadWeekAttendanceByWeekId(info.weekId, info.start, info.end);
+  const { deficit, attendanceFine } = calculateAttendancePenalty(week, memberId);
+
+  let entry = (ledger.entries || []).find(
+    e => e.weekId === info.weekId && e.memberId === memberId
+  );
+
+  if (!entry) {
+    entry = {
+      weekId: info.weekId,
+      memberId,
+      finalizedAt: new Date().toISOString(),
+      payments: []
+    };
+    if (!Array.isArray(ledger.entries)) ledger.entries = [];
+    ledger.entries.push(entry);
+  }
+
+  applyLedgerFine(entry, attendanceFine, deficit);
+  return { entry, week, info };
+}
+
+function countPassesForMember(ledger, memberId, excludeWeekId = null) {
+  return (ledger.entries || []).filter(e =>
+    e.memberId === memberId &&
+    e.weekId !== excludeWeekId &&
+    normalizeLedgerEntry(e).passUsed
+  ).length;
+}
+
 async function recalcLedgerForWeek(weekId, week) {
   const ledger = await readJson('data/ledger.json', { entries: [] });
+  if (!Array.isArray(ledger.entries)) ledger.entries = [];
   const members = await loadActiveMembers();
 
-  const REQUIRED_DAYS = 4;
   const finalizedAt = new Date().toISOString();
 
   for (const m of members) {
-    const count = countUniqueAttendanceDays(week, m.id);
-    const deficit = Math.max(0, REQUIRED_DAYS - count);
-    const fine = count >= REQUIRED_DAYS ? 0 : 10000;
+    const { deficit, attendanceFine } = calculateAttendancePenalty(week, m.id);
 
     const existing = (ledger.entries || []).find(
       e => e.weekId === weekId && e.memberId === m.id
     );
 
     if (existing) {
-      existing.deficit = deficit;
-      existing.fine = fine;
+      applyLedgerFine(existing, attendanceFine, deficit);
       existing.finalizedAt = existing.finalizedAt || finalizedAt;
-      if (!Array.isArray(existing.payments)) existing.payments = [];
     } else {
-      ledger.entries.push({
+      const entry = {
         weekId,
         memberId: m.id,
-        deficit,
-        fine,
         finalizedAt,
         payments: []
-      });
+      };
+      applyLedgerFine(entry, attendanceFine, deficit);
+      ledger.entries.push(entry);
     }
   }
 
@@ -221,53 +324,10 @@ app.post('/api/finalize', authAdmin, async (req, res) => {
       return res.json({ ok: true, message: 'already finalized', weekId });
     }
 
-    // ===== 멤버 목록 로드 =====
-    let membersData = await readJson('data/members.json', { members: [] });
-    // members.json 이 배열이든 { members: [...] } 이든 모두 처리
-    let members = Array.isArray(membersData)
-      ? membersData
-      : (membersData.members || []);
-    members = members.filter((m) => m.active !== false);
-
-    // ===== 멤버별 출석일 집계 (고유 날짜 기준) =====
-    const unique = new Set(
-      week.checkins.map((c) => `${c.memberId}|${c.date.slice(0, 10)}`)
-    );
-    const counts = {};
-    unique.forEach((k) => {
-      const [mid] = k.split('|');
-      counts[mid] = (counts[mid] || 0) + 1;
-    });
-
-    // ===== 기존 ledger 로드 =====
-    const ledger = await readJson('data/ledger.json', { entries: [] });
-
-    // 1인당 요구 출석일: 주 4회
-    const REQUIRED_DAYS = 4;
-    const finalizedAt = new Date().toISOString();
-
-    // ===== 모든 멤버에 대해 엔트리 생성 (벌금 0도 포함) =====
-    // 규칙:
-    // - 4회 이상 출석: 벌금 0원
-    // - 4회 미만 출석: 부족 횟수와 관계없이 벌금 10000원
-    for (const m of members) {
-      const count = counts[m.id] || 0;
-      const deficit = Math.max(0, REQUIRED_DAYS - count);
-      const fine = count >= REQUIRED_DAYS ? 0 : 10000;
-
-      ledger.entries.push({
-        weekId,
-        memberId: m.id,
-        deficit,
-        fine,
-        finalizedAt,
-      });
-    }
-
     // ===== 파일 저장 =====
     week.finalized = true;
     await writeJson(weekPath, week);
-    await writeJson('data/ledger.json', ledger);
+    await recalcLedgerForWeek(weekId, week);
 
     return res.json({ ok: true, message: 'week finalized', weekId });
   } catch (err) {
@@ -320,7 +380,13 @@ app.get('/api/ledger', async (req, res) => {
     const { weekId, memberId, summary, unpaidOnly } = req.query;
 
     const ledger = await readJson('data/ledger.json', { entries: [] });
-    let entries = ledger.entries.map(e => {
+    const allEntries = (ledger.entries || []).map(e => normalizeLedgerEntry(e));
+    const passCounts = {};
+    for (const e of allEntries) {
+      if (e.passUsed) passCounts[e.memberId] = (passCounts[e.memberId] || 0) + 1;
+    }
+
+    let entries = allEntries.map(e => {
       const fine = Number(e.fine) || 0;
       const paid = Array.isArray(e.payments)
         ? e.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0)
@@ -354,24 +420,36 @@ app.get('/api/ledger', async (req, res) => {
             memberId: e.memberId,
             totalDeficit: 0,
             totalFine: 0,
+            totalAttendanceFine: 0,
+            totalExtraFine: 0,
             totalPaid: 0,
             outstanding: 0,
-            weeks: new Set()
+            weeks: new Set(),
+            passUsedCount: passCounts[e.memberId] || 0,
+            passUsedInRows: 0
           };
         }
         byMember[e.memberId].totalDeficit += e.deficit || 0;
         byMember[e.memberId].totalFine += e.fine;
+        byMember[e.memberId].totalAttendanceFine += e.attendanceFine || 0;
+        byMember[e.memberId].totalExtraFine += e.extraFine || 0;
         byMember[e.memberId].totalPaid += e.totalPaid;
         byMember[e.memberId].outstanding += e.outstanding;
         byMember[e.memberId].weeks.add(e.weekId);
+        if (e.passUsed) byMember[e.memberId].passUsedInRows += 1;
       }
       const rows = Object.values(byMember).map(x => ({
         memberId: x.memberId,
         totalDeficit: x.totalDeficit,
         totalFine: x.totalFine,
+        totalAttendanceFine: x.totalAttendanceFine,
+        totalExtraFine: x.totalExtraFine,
         totalPaid: x.totalPaid,
         outstanding: x.outstanding,
         fullyPaid: x.outstanding === 0,
+        passUsedCount: x.passUsedCount,
+        passUsedInRows: x.passUsedInRows,
+        passRemaining: Math.max(0, PASS_LIMIT - x.passUsedCount),
         weeks: Array.from(x.weeks).sort()
       })).sort((a,b)=> a.memberId > b.memberId ? 1 : -1);
       return res.json({ summary: 'member', rows });
@@ -437,7 +515,8 @@ app.post('/api/ledger/pay', authAdmin, async (req, res) => {
     const memberEntries = (ledger.entries || [])
       .filter(e => e.memberId === memberId)
       .map(e => {
-        const fine = Number(e.fine) || 0;
+        const normalized = normalizeLedgerEntry(e);
+        const fine = Number(normalized.fine) || 0;
         const paid = Array.isArray(e.payments)
           ? e.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
           : 0;
@@ -489,7 +568,8 @@ app.post('/api/ledger/pay', authAdmin, async (req, res) => {
     const refreshedEntries = (ledger.entries || [])
       .filter(e => e.memberId === memberId)
       .map(e => {
-        const fine = Number(e.fine) || 0;
+        const normalized = normalizeLedgerEntry(e);
+        const fine = Number(normalized.fine) || 0;
         const totalPaid = Array.isArray(e.payments)
           ? e.payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
           : 0;
@@ -786,6 +866,110 @@ app.post('/api/admin/attendance/cancel', authAdmin, async (req, res) => {
   }
 });
 
+app.post('/api/admin/attendance/excuse-member-week', authAdmin, async (req, res) => {
+  try {
+    const { memberId, weekId } = req.body || {};
+
+    if (!memberId || !weekId) {
+      return res.status(400).json({ error: 'memberId and weekId are required' });
+    }
+
+    const member = await validateActiveMember(memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const info = getWeekInfoFromWeekId(weekId);
+    const { week, weekPath } = await loadWeekAttendanceByWeekId(
+      info.weekId,
+      info.start,
+      info.end
+    );
+
+    const monday = dayjs(info.start);
+    const targetDates = [0, 1, 2, 3].map(offset =>
+      monday.add(offset, 'day').format('YYYY-MM-DD')
+    );
+
+    let addedCount = 0;
+    for (const dateStr of targetDates) {
+      const added = addExcusedCheckin(week, memberId, dateStr);
+      if (added) addedCount += 1;
+    }
+
+    await writeJson(weekPath, week);
+
+    let ledgerRecalculated = false;
+    if (week.finalized) {
+      await recalcLedgerForWeek(info.weekId, week);
+      ledgerRecalculated = true;
+    }
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      dates: targetDates,
+      addedCount,
+      finalized: !!week.finalized,
+      ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/attendance/cancel-member-week', authAdmin, async (req, res) => {
+  try {
+    const { memberId, weekId } = req.body || {};
+
+    if (!memberId || !weekId) {
+      return res.status(400).json({ error: 'memberId and weekId are required' });
+    }
+
+    const member = await validateActiveMember(memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const info = getWeekInfoFromWeekId(weekId);
+    const { week, weekPath } = await loadWeekAttendanceByWeekId(
+      info.weekId,
+      info.start,
+      info.end
+    );
+
+    const monday = dayjs(info.start);
+    const targetDates = [0, 1, 2, 3].map(offset =>
+      monday.add(offset, 'day').format('YYYY-MM-DD')
+    );
+
+    const removedCount = removeCheckinsOnDates(week, memberId, targetDates);
+
+    await writeJson(weekPath, week);
+
+    let ledgerRecalculated = false;
+    if (week.finalized) {
+      await recalcLedgerForWeek(info.weekId, week);
+      ledgerRecalculated = true;
+    }
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      dates: targetDates,
+      removedCount,
+      finalized: !!week.finalized,
+      ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
 app.post('/api/admin/attendance/excuse-week', authAdmin, async (req, res) => {
   try {
     const { weekId } = req.body || {};
@@ -832,6 +1016,91 @@ app.post('/api/admin/attendance/excuse-week', authAdmin, async (req, res) => {
       addedCount,
       finalized: !!week.finalized,
       ledgerRecalculated
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/ledger/extra-fine', authAdmin, async (req, res) => {
+  try {
+    const { memberId, weekId, amount, reason } = req.body || {};
+
+    if (!memberId || !weekId) {
+      return res.status(400).json({ error: 'memberId and weekId are required' });
+    }
+
+    const member = await validateActiveMember(memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const extraFine = Number(amount);
+    if (!Number.isFinite(extraFine) || extraFine < 0) {
+      return res.status(400).json({ error: 'amount must be a non-negative number' });
+    }
+
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const { entry, info } = await findOrCreateLedgerEntry(ledger, weekId, memberId);
+
+    entry.extraFine = Math.round(extraFine);
+    entry.extraFineReason = entry.extraFine > 0 ? String(reason || '').trim() : '';
+    applyLedgerFine(entry, entry.attendanceFine, entry.deficit || 0);
+
+    await writeJson('data/ledger.json', ledger);
+
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      ...normalizeLedgerEntry(entry)
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/ledger/pass', authAdmin, async (req, res) => {
+  try {
+    const { memberId, weekId, used } = req.body || {};
+
+    if (!memberId || !weekId || typeof used !== 'boolean') {
+      return res.status(400).json({ error: 'memberId, weekId and boolean used are required' });
+    }
+
+    const member = await validateActiveMember(memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'active member not found' });
+    }
+
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const { entry, week, info } = await findOrCreateLedgerEntry(ledger, weekId, memberId);
+
+    const current = normalizeLedgerEntry(entry);
+    const usedCountExcludingCurrent = countPassesForMember(ledger, memberId, info.weekId);
+
+    if (used && !current.passUsed && usedCountExcludingCurrent >= PASS_LIMIT) {
+      return res.status(400).json({ error: `까방권은 멤버당 최대 ${PASS_LIMIT}회까지 사용할 수 있습니다.` });
+    }
+
+    entry.passUsed = used;
+    entry.passUsedAt = used ? (current.passUsedAt || new Date().toISOString()) : null;
+
+    const { deficit, attendanceFine } = calculateAttendancePenalty(week, memberId);
+    applyLedgerFine(entry, attendanceFine, deficit);
+
+    await writeJson('data/ledger.json', ledger);
+
+    const passUsedCount = countPassesForMember(ledger, memberId);
+    return res.json({
+      ok: true,
+      weekId: info.weekId,
+      memberId,
+      passUsedCount,
+      passRemaining: Math.max(0, PASS_LIMIT - passUsedCount),
+      ...normalizeLedgerEntry(entry)
     });
   } catch (err) {
     console.error(err);

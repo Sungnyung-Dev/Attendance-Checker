@@ -39,6 +39,15 @@ function fmtWon(n) {
   return KRW.format(Number(n) || 0) + '원';
 }
 
+function escapeHTML(v) {
+  return String(v || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
 function getTodayLocalDateString() {
   const now = new Date();
   const y = now.getFullYear();
@@ -48,6 +57,19 @@ function getTodayLocalDateString() {
 }
 
 let memberMap = null;
+const memberSelectIds = [
+  'excuseMemberId',
+  'memberWeekMemberId',
+  'extraFineMemberId',
+  'passMemberId'
+];
+const weekSelectIds = [
+  'excuseWeekId',
+  'memberWeekId',
+  'extraFineWeekId',
+  'passWeekId'
+];
+
 async function ensureMemberMap() {
   if (memberMap) return memberMap;
   try {
@@ -81,21 +103,28 @@ async function loadExcuseControls() {
 
   try {
     const members = await fetchJSON('/api/members');
-    const memberSel = $('#excuseMemberId');
-    memberSel.innerHTML = `<option value="">멤버를 선택하세요</option>`;
-    members.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = `${m.name || m.id} (${m.id})`;
-      memberSel.appendChild(opt);
+    memberSelectIds.forEach(id => {
+      const memberSel = document.getElementById(id);
+      if (!memberSel) return;
+      const selected = memberSel.value;
+      memberSel.innerHTML = `<option value="">멤버를 선택하세요</option>`;
+      members.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = `${m.name || m.id} (${m.id})`;
+        memberSel.appendChild(opt);
+      });
+      if (selected) memberSel.value = selected;
     });
   } catch {
-    $('#excuseMemberId').innerHTML = `<option value="">멤버 불러오기 실패</option>`;
+    memberSelectIds.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = `<option value="">멤버 불러오기 실패</option>`;
+    });
   }
 
   try {
     const hist = await fetchJSON('/api/ledger?summary=week');
-    const weekSel = $('#excuseWeekId');
 
     const weekIds = new Set((hist.rows || []).map(r => r.weekId));
     const current = await fetchJSON('/api/week');
@@ -103,19 +132,24 @@ async function loadExcuseControls() {
 
     const sorted = Array.from(weekIds).sort((a, b) => (a > b ? -1 : 1));
 
-    weekSel.innerHTML = `<option value="">주차를 선택하세요</option>`;
-    sorted.forEach(weekId => {
-      const opt = document.createElement('option');
-      opt.value = weekId;
-      opt.textContent = fmtWeekId(weekId);
-      weekSel.appendChild(opt);
+    weekSelectIds.forEach(id => {
+      const weekSel = document.getElementById(id);
+      if (!weekSel) return;
+      const selected = weekSel.value;
+      weekSel.innerHTML = `<option value="">주차를 선택하세요</option>`;
+      sorted.forEach(weekId => {
+        const opt = document.createElement('option');
+        opt.value = weekId;
+        opt.textContent = fmtWeekId(weekId);
+        weekSel.appendChild(opt);
+      });
+      weekSel.value = selected || current?.weekId || '';
     });
-
-    if (current?.weekId) {
-      weekSel.value = current.weekId;
-    }
   } catch {
-    $('#excuseWeekId').innerHTML = `<option value="">주차 불러오기 실패</option>`;
+    weekSelectIds.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = `<option value="">주차 불러오기 실패</option>`;
+    });
   }
 }
 
@@ -267,10 +301,160 @@ async function approveWholeWeek() {
   }
 }
 
+async function approveMemberWeek() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#memberWeekMemberId').value;
+    const weekId = $('#memberWeekId').value;
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!weekId) throw new Error('주차를 선택하세요.');
+
+    const name = memberMap?.[memberId] || memberId;
+    const ok = confirm(`${name}의 ${fmtWeekId(weekId)} 월~목 4일 출석을 인정하시겠습니까?`);
+    if (!ok) return;
+
+    const res = await fetchJSON('/api/admin/attendance/excuse-member-week', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, weekId })
+    });
+
+    const recalcText = res.ledgerRecalculated ? ' 정산도 다시 계산했습니다.' : '';
+    setAlert(
+      'success',
+      `${name} · ${fmtWeekId(res.weekId)} · 총 ${res.addedCount || 0}건의 출석을 추가했습니다.${recalcText}`
+    );
+
+    await loadWeek();
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '멤버별 주차 출석 인정 실패');
+  }
+}
+
+async function cancelMemberWeek() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#memberWeekMemberId').value;
+    const weekId = $('#memberWeekId').value;
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!weekId) throw new Error('주차를 선택하세요.');
+
+    const name = memberMap?.[memberId] || memberId;
+    const ok = confirm(`${name}의 ${fmtWeekId(weekId)} 월~목 출석 기록을 모두 취소하시겠습니까?`);
+    if (!ok) return;
+
+    const res = await fetchJSON('/api/admin/attendance/cancel-member-week', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, weekId })
+    });
+
+    const recalcText = res.ledgerRecalculated ? ' 정산도 다시 계산했습니다.' : '';
+    setAlert(
+      'warning',
+      `${name} · ${fmtWeekId(res.weekId)} · 총 ${res.removedCount || 0}건의 출석을 취소했습니다.${recalcText}`
+    );
+
+    await loadWeek();
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '멤버별 주차 출석 취소 실패');
+  }
+}
+
+async function saveExtraFine() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#extraFineMemberId').value;
+    const weekId = $('#extraFineWeekId').value;
+    const amount = Number($('#extraFineAmount').value || 0);
+    const reason = $('#extraFineReason').value.trim();
+
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!weekId) throw new Error('주차를 선택하세요.');
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('추가 벌금은 0원 이상이어야 합니다.');
+
+    const res = await fetchJSON('/api/admin/ledger/extra-fine', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, weekId, amount, reason })
+    });
+
+    const name = memberMap?.[memberId] || memberId;
+    setAlert(
+      'success',
+      `${name} · ${fmtWeekId(res.weekId)} · 추가 벌금 ${fmtWon(res.extraFine)} 저장 완료`
+    );
+
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '추가 벌금 저장 실패');
+  }
+}
+
+async function setPassUsage(used) {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#passMemberId').value;
+    const weekId = $('#passWeekId').value;
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    if (!weekId) throw new Error('주차를 선택하세요.');
+
+    const name = memberMap?.[memberId] || memberId;
+    const verb = used ? '사용' : '해제';
+    const ok = confirm(`${name}의 ${fmtWeekId(weekId)} 까방권을 ${verb}하시겠습니까?`);
+    if (!ok) return;
+
+    const res = await fetchJSON('/api/admin/ledger/pass', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ memberId, weekId, used })
+    });
+
+    setAlert(
+      'success',
+      `${name} · ${fmtWeekId(res.weekId)} · 까방권 ${verb} 완료 (사용 ${res.passUsedCount}/3, 잔여 ${res.passRemaining})`
+    );
+
+    await loadExcuseControls();
+    await loadMemberSummary();
+    await loadLedgerChart();
+  } catch (err) {
+    setAlert('danger', err.message || '까방권 처리 실패');
+  }
+}
+
 async function loadMemberSummary() {
   const tbody = $('#memberSummaryBody');
   tbody.innerHTML =
-    `<tr><td colspan="6" class="text-center text-muted">로딩 중…</td></tr>`;
+    `<tr><td colspan="7" class="text-center text-muted">로딩 중…</td></tr>`;
 
   try {
     await ensureMemberMap();
@@ -284,7 +468,7 @@ async function loadMemberSummary() {
 
     if (!rows.length) {
       tbody.innerHTML =
-        `<tr><td colspan="6" class="text-center text-muted">데이터가 없습니다.</td></tr>`;
+        `<tr><td colspan="7" class="text-center text-muted">데이터가 없습니다.</td></tr>`;
       $('#sumDeficit').textContent = '-';
       $('#sumFine').textContent = '-';
       $('#sumPaid').textContent = '-';
@@ -315,6 +499,8 @@ async function loadMemberSummary() {
                <button class="btn btn-outline-secondary btn-sm log-btn"
                        data-member="${r.memberId}">내역</button>
              </div>`;
+        const passUsedCount = Number(r.passUsedCount) || 0;
+        const passRemaining = r.passRemaining ?? Math.max(0, 3 - passUsedCount);
 
         return `
           <tr>
@@ -323,6 +509,7 @@ async function loadMemberSummary() {
             <td>${fmtWon(r.totalFine ?? 0)}</td>
             <td>${fmtWon(r.totalPaid ?? 0)}</td>
             <td>${fmtWon(r.outstanding ?? 0)}</td>
+            <td>사용 ${passUsedCount}/3<br><span class="text-muted small">잔여 ${passRemaining}</span></td>
             <td>${statusCell}</td>
           </tr>
         `;
@@ -337,7 +524,7 @@ async function loadMemberSummary() {
     $('#sumOutstanding').textContent = fmtWon(sOut);
   } catch (e) {
     tbody.innerHTML =
-      `<tr><td colspan="6" class="text-danger text-center">로드 실패: ${e.message || '에러'}</td></tr>`;
+      `<tr><td colspan="7" class="text-danger text-center">로드 실패: ${e.message || '에러'}</td></tr>`;
   }
 }
 
@@ -413,7 +600,7 @@ async function openPaymentLog(memberId) {
 
     let html = `<h6 class="mb-3">${memberName} (${memberId})</h6>`;
     html += `<div class="table-responsive"><table class="table table-sm table-striped align-middle">
-      <thead><tr><th>주차</th><th>벌금</th><th>납부내역</th><th>총 납부액</th><th>미납</th></tr></thead><tbody>`;
+      <thead><tr><th>주차</th><th>출석벌금</th><th>추가벌금</th><th>까방권</th><th>총 벌금</th><th>납부내역</th><th>총 납부액</th><th>미납</th></tr></thead><tbody>`;
 
     for (const e of entries) {
       const pays = Array.isArray(e.payments) && e.payments.length
@@ -435,6 +622,9 @@ async function openPaymentLog(memberId) {
 
       html += `<tr>
         <td>${fmtWeekId(e.weekId)}</td>
+        <td>${fmtWon(e.attendanceFine)}</td>
+        <td>${fmtWon(e.extraFine)}${e.extraFineReason ? `<br><span class="text-muted small">${escapeHTML(e.extraFineReason)}</span>` : ''}</td>
+        <td>${e.passUsed ? '<span class="badge text-bg-success">사용</span>' : '<span class="text-muted small">-</span>'}</td>
         <td>${fmtWon(e.fine)}</td>
         <td>${pays}</td>
         <td>${fmtWon(totalPaid)}</td>
@@ -554,7 +744,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   $('#approveSingleBtn').addEventListener('click', approveSingleAttendance);
   $('#cancelSingleBtn').addEventListener('click', cancelSingleAttendance);
+  $('#approveMemberWeekBtn').addEventListener('click', approveMemberWeek);
+  $('#cancelMemberWeekBtn').addEventListener('click', cancelMemberWeek);
   $('#approveWeekBtn').addEventListener('click', approveWholeWeek);
+  $('#saveExtraFineBtn').addEventListener('click', saveExtraFine);
+  $('#usePassBtn').addEventListener('click', () => setPassUsage(true));
+  $('#revokePassBtn').addEventListener('click', () => setPassUsage(false));
 
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
