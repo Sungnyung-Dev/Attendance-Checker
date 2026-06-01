@@ -500,7 +500,6 @@ async function loadMemberSummary() {
                        data-member="${r.memberId}">내역</button>
              </div>`;
         const passUsedCount = Number(r.passUsedCount) || 0;
-        const passRemaining = r.passRemaining ?? Math.max(0, 3 - passUsedCount);
 
         return `
           <tr>
@@ -509,7 +508,7 @@ async function loadMemberSummary() {
             <td>${fmtWon(r.totalFine ?? 0)}</td>
             <td>${fmtWon(r.totalPaid ?? 0)}</td>
             <td>${fmtWon(r.outstanding ?? 0)}</td>
-            <td>사용 ${passUsedCount}/3<br><span class="text-muted small">잔여 ${passRemaining}</span></td>
+            <td>사용 ${passUsedCount}/3</td>
             <td>${statusCell}</td>
           </tr>
         `;
