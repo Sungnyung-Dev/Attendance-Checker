@@ -23,23 +23,44 @@
       </div>
     </div>
 
-    <!-- 현재 주 정보 -->
-    <div class="card mb-3">
-      <div class="card-body d-flex justify-content-between align-items-center">
-        <div>
-          <div class="fw-semibold">현재 주</div>
-          <div id="weekInfo" class="text-muted small">로딩 중…</div>
-        </div>
-        <button id="finalizeBtn" class="btn btn-danger">주간 마감</button>
-      </div>
-    </div>
-
     <!-- 결과 -->
     <div id="result" class="alert d-none" role="alert"></div>
 
-    <!-- 출석 인정 관리 -->
     <div class="card mb-3">
+      <div class="card-header bg-white p-0">
+        <ul class="nav nav-tabs nav-fill border-bottom-0" id="adminTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active py-3" id="attendance-tab"
+                    data-bs-toggle="tab" data-bs-target="#attendance-pane"
+                    type="button" role="tab" aria-controls="attendance-pane"
+                    aria-selected="true">출석 관리</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link py-3" id="fine-tab"
+                    data-bs-toggle="tab" data-bs-target="#fine-pane"
+                    type="button" role="tab" aria-controls="fine-pane"
+                    aria-selected="false">벌금 관리</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link py-3" id="settlement-tab"
+                    data-bs-toggle="tab" data-bs-target="#settlement-pane"
+                    type="button" role="tab" aria-controls="settlement-pane"
+                    aria-selected="false">정산 현황</button>
+          </li>
+        </ul>
+      </div>
       <div class="card-body">
+        <div class="tab-content" id="adminTabContent">
+          <div class="tab-pane fade show active" id="attendance-pane"
+               role="tabpanel" aria-labelledby="attendance-tab" tabindex="0">
+            <div class="d-flex flex-wrap gap-3 justify-content-between align-items-center border-bottom pb-3 mb-4">
+              <div>
+                <div class="fw-semibold">현재 주</div>
+                <div id="weekInfo" class="text-muted small">로딩 중…</div>
+              </div>
+              <button id="finalizeBtn" class="btn btn-danger">주간 마감</button>
+            </div>
+
         <div class="fw-semibold mb-1">출석 인정 관리</div>
         <div class="text-muted small mb-3">
           개별 날짜, 멤버별 주차, 시험 주간 전체 출석 인정
@@ -122,12 +143,10 @@
             </div>
           </div>
         </div>
-      </div>
-    </div>
+          </div>
 
-    <!-- 벌금 / 까방권 관리 -->
-    <div class="card mb-3">
-      <div class="card-body">
+          <div class="tab-pane fade" id="fine-pane"
+               role="tabpanel" aria-labelledby="fine-tab" tabindex="0">
         <div class="fw-semibold mb-1">벌금 / 까방권 관리</div>
         <div class="text-muted small mb-3">
           주차별 추가 벌금, 멤버별 까방권, 벌금 사용 내역을 관리합니다.
@@ -259,12 +278,11 @@
             </tbody>
           </table>
         </div>
-      </div>
-    </div>
+          </div>
 
-    <!-- 멤버별 합계 -->
-    <div class="card mb-3">
-      <div class="card-body">
+          <div class="tab-pane fade" id="settlement-pane"
+               role="tabpanel" aria-labelledby="settlement-tab" tabindex="0">
+        <section class="mb-4">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <div>
             <div class="fw-semibold">멤버별 합계</div>
@@ -310,20 +328,27 @@
             </tfoot>
           </table>
         </div>
+        </section>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- 주차별 통계 그래프 -->
     <div class="card mb-3">
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <div>
-            <div class="fw-semibold">주차별 총 벌금 / 미납액 추이</div>
-            <div class="text-muted small">최근 주차 기준</div>
+            <div class="fw-semibold">주차별 벌금 및 공금 추이</div>
+            <div class="text-muted small">실제 입출금 주차 기준</div>
           </div>
           <button id="refreshChartBtn" class="btn btn-outline-primary btn-sm">새로고침</button>
         </div>
-        <canvas id="ledgerChart" height="150"></canvas>
+        <div id="ledgerChartMessage" class="text-center text-muted py-5" aria-live="polite">
+          관리자 토큰 저장 후 조회할 수 있습니다.
+        </div>
+        <div id="ledgerChartWrap" class="d-none position-relative" style="height: 320px;">
+          <canvas id="ledgerChart"></canvas>
+        </div>
       </div>
     </div>
   </div>

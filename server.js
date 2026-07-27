@@ -7,7 +7,11 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek.js';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 dayjs.extend(isoWeek);
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const app = express();
 app.use(express.json());
@@ -18,6 +22,7 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const REQUIRED_DAYS = 4;
 const PASS_LIMIT = 3;
+const ADMIN_ZONE = 'Asia/Seoul';
 
 // 멤버별 금주 고유 출석일 수 집계
 app.get('/api/week', async (req, res) => {
@@ -309,6 +314,67 @@ function calculateFundSummary(ledger) {
     availableBalance: totalCollected - totalSpent,
     expenses
   };
+}
+
+function calculateFundTrend(ledger) {
+  const byWeek = new Map();
+  const ensureWeek = weekId => {
+    if (!byWeek.has(weekId)) {
+      byWeek.set(weekId, {
+        weekId,
+        weeklyFine: 0,
+        weeklyCollected: 0,
+        weeklySpent: 0
+      });
+    }
+    return byWeek.get(weekId);
+  };
+
+  for (const rawEntry of ledger.entries || []) {
+    const entry = normalizeLedgerEntry(rawEntry);
+    if (!entry.weekId) continue;
+
+    ensureWeek(entry.weekId).weeklyFine += toMoney(entry.fine);
+
+    const payments = Array.isArray(entry.payments) ? entry.payments : [];
+    for (const payment of payments) {
+      let paymentWeekId = entry.weekId;
+      if (payment.paidAt) {
+        const paidAt = dayjs(payment.paidAt);
+        if (paidAt.isValid()) {
+          const paidInSeoul = paidAt.tz(ADMIN_ZONE);
+          paymentWeekId =
+            `${paidInSeoul.isoWeekYear()}-W${String(paidInSeoul.isoWeek()).padStart(2, '0')}`;
+        }
+      }
+      ensureWeek(paymentWeekId).weeklyCollected += toMoney(payment.amount);
+    }
+  }
+
+  for (const expense of normalizeFundExpenses(ledger)) {
+    if (!expense.weekId || expense.canceledAt) continue;
+    ensureWeek(expense.weekId).weeklySpent += expense.amount;
+  }
+
+  let cumulativeFine = 0;
+  let cumulativeCollected = 0;
+  let cumulativeSpent = 0;
+
+  return Array.from(byWeek.values())
+    .sort((a, b) => a.weekId.localeCompare(b.weekId))
+    .map(row => {
+      cumulativeFine += row.weeklyFine;
+      cumulativeCollected += row.weeklyCollected;
+      cumulativeSpent += row.weeklySpent;
+
+      return {
+        ...row,
+        cumulativeFine,
+        cumulativeCollected,
+        cumulativeSpent,
+        availableBalance: cumulativeCollected - cumulativeSpent
+      };
+    });
 }
 
 async function recalcLedgerForWeek(weekId, week) {
@@ -645,7 +711,8 @@ app.get('/api/admin/fund', authAdmin, async (req, res) => {
       totalCollected: summary.totalCollected,
       totalSpent: summary.totalSpent,
       availableBalance: summary.availableBalance,
-      expenses
+      expenses,
+      trend: calculateFundTrend(ledger)
     });
   } catch (err) {
     console.error(err);

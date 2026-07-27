@@ -546,6 +546,7 @@ async function saveFundExpense() {
       `${fmtWeekId(data.expense.weekId)} · ${fmtWon(data.expense.amount)} 사용 내역을 저장했습니다.`
     );
     await loadFundLedger();
+    await loadLedgerChart();
   } catch (err) {
     setAlert('danger', err.message || '벌금 사용 내역 저장 실패');
   }
@@ -574,6 +575,7 @@ async function cancelFundExpense(expenseId) {
         : `${fmtWon(data.expense.amount)} 사용 내역을 취소했습니다.`
     );
     await loadFundLedger();
+    await loadLedgerChart();
   } catch (err) {
     setAlert('danger', err.message || '벌금 사용 내역 취소 실패');
   }
@@ -770,53 +772,102 @@ async function openPaymentLog(memberId) {
 
 let ledgerChart = null;
 
+function showLedgerChartMessage(message, isError = false) {
+  const messageBox = $('#ledgerChartMessage');
+  const chartWrap = $('#ledgerChartWrap');
+
+  chartWrap.classList.add('d-none');
+  messageBox.className =
+    `text-center py-5 ${isError ? 'text-danger' : 'text-muted'}`;
+  messageBox.textContent = message;
+}
+
 async function loadLedgerChart() {
+  const token = getToken();
+  if (!token) {
+    if (ledgerChart) {
+      ledgerChart.destroy();
+      ledgerChart = null;
+    }
+    showLedgerChartMessage('관리자 토큰 저장 후 조회할 수 있습니다.');
+    return;
+  }
+
+  showLedgerChartMessage('그래프를 불러오는 중...');
+
   try {
-    const data = await fetchJSON('/api/ledger?summary=week');
-    const rows = (data.rows || [])
-      .slice()
-      .sort((a, b) => (a.weekId > b.weekId ? 1 : -1));
+    const data = await fetchJSON('/api/admin/fund', {
+      headers: { 'x-admin-token': token }
+    });
+    const rows = data.trend || [];
+
+    if (!rows.length) {
+      if (ledgerChart) {
+        ledgerChart.destroy();
+        ledgerChart = null;
+      }
+      showLedgerChartMessage('표시할 정산 데이터가 없습니다.');
+      return;
+    }
 
     const labels = rows.map(r => fmtWeekId(r.weekId));
 
-    let accFine = 0;
-    let accOut = 0;
-    const cumFine = [];
-    const cumOut = [];
-
-    for (const r of rows) {
-      accFine += Number(r.totalFine) || 0;
-      accOut += Number(r.outstanding) || 0;
-      cumFine.push(accFine);
-      cumOut.push(accOut);
-    }
-
     const ctx = document.getElementById('ledgerChart');
     if (!ctx) return;
+
+    $('#ledgerChartMessage').classList.add('d-none');
+    $('#ledgerChartWrap').classList.remove('d-none');
 
     const chartData = {
       labels,
       datasets: [
         {
           label: '누적 총 벌금',
-          data: cumFine,
-          tension: 0.25
+          data: rows.map(r => Number(r.cumulativeFine) || 0),
+          type: 'line',
+          borderColor: '#0d6efd',
+          backgroundColor: '#0d6efd',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.25,
+          order: 1
         },
         {
-          label: '누적 미납액',
-          data: cumOut,
-          tension: 0.25
+          label: '현재 벌금 잔고',
+          data: rows.map(r => Number(r.availableBalance) || 0),
+          type: 'line',
+          borderColor: '#198754',
+          backgroundColor: '#198754',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.25,
+          order: 1
+        },
+        {
+          label: '사용 금액',
+          data: rows.map(r => Number(r.weeklySpent) || 0),
+          type: 'bar',
+          backgroundColor: 'rgba(220, 53, 69, 0.65)',
+          borderColor: '#dc3545',
+          borderWidth: 1,
+          borderRadius: 3,
+          order: 2
         }
       ]
     };
 
     const chartOptions = {
       responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
       scales: {
         y: {
           beginAtZero: true,
           ticks: {
-            callback: val => val.toLocaleString() + '원'
+            callback: val => fmtWon(val)
           },
           title: {
             display: true,
@@ -834,7 +885,7 @@ async function loadLedgerChart() {
         legend: { position: 'bottom' },
         tooltip: {
           callbacks: {
-            label: ctx => `${ctx.dataset.label}: ${ctx.formattedValue}원`
+            label: ctx => `${ctx.dataset.label}: ${fmtWon(ctx.raw)}`
           }
         }
       }
@@ -846,8 +897,17 @@ async function loadLedgerChart() {
       data: chartData,
       options: chartOptions
     });
+    ledgerChart.resize();
   } catch (err) {
     console.error('Chart load error:', err);
+    if (ledgerChart) {
+      ledgerChart.destroy();
+      ledgerChart = null;
+    }
+    showLedgerChartMessage(
+      `그래프 조회 실패: ${err.message || '오류'}`,
+      true
+    );
   }
 }
 
@@ -855,10 +915,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   const input = $('#adminToken');
   input.value = getToken();
 
-  $('#saveTokenBtn').addEventListener('click', () => {
+  $('#saveTokenBtn').addEventListener('click', async () => {
     setToken(input.value.trim());
     setAlert('success', '토큰 저장 완료');
-    loadFundLedger();
+    await loadFundLedger();
+    await loadLedgerChart();
   });
 
   $('#finalizeBtn').addEventListener('click', () => {
@@ -883,6 +944,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
+  $('#refreshChartBtn').addEventListener('click', loadLedgerChart);
+  $('#settlement-tab').addEventListener('shown.bs.tab', async () => {
+    await loadMemberSummary();
+  });
 
   payModal = new bootstrap.Modal(document.getElementById('payModal'));
   paymentLogModal = new bootstrap.Modal(document.getElementById('paymentLogModal'));
