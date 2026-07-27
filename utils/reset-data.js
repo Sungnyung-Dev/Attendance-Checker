@@ -20,6 +20,9 @@ for (const f of fs.readdirSync(dataDir)) {
 }
 
 // ledger 초기화
-fs.writeFileSync(path.join(dataDir, 'ledger.json'), JSON.stringify({ entries: [] }, null, 2));
+fs.writeFileSync(
+  path.join(dataDir, 'ledger.json'),
+  JSON.stringify({ entries: [], fundExpenses: [] }, null, 2)
+);
 
 console.log('[OK] data reset. Backup ->', backupDir);

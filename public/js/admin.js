@@ -67,7 +67,8 @@ const weekSelectIds = [
   'excuseWeekId',
   'memberWeekId',
   'extraFineWeekId',
-  'passWeekId'
+  'passWeekId',
+  'fundExpenseWeekId'
 ];
 
 async function ensureMemberMap() {
@@ -440,7 +441,7 @@ async function setPassUsage(used) {
 
     setAlert(
       'success',
-      `${name} · ${fmtWeekId(res.weekId)} · 까방권 ${verb} 완료 (사용 ${res.passUsedCount}/3, 잔여 ${res.passRemaining})`
+      `${name} · ${fmtWeekId(res.weekId)} · 까방권 ${verb} 완료 (사용 ${res.passUsedCount}/3)`
     );
 
     await loadExcuseControls();
@@ -448,6 +449,133 @@ async function setPassUsage(used) {
     await loadLedgerChart();
   } catch (err) {
     setAlert('danger', err.message || '까방권 처리 실패');
+  }
+}
+
+function renderFundSummary(data) {
+  $('#fundTotalCollected').textContent = fmtWon(data.totalCollected);
+  $('#fundTotalSpent').textContent = fmtWon(data.totalSpent);
+  $('#fundAvailableBalance').textContent = fmtWon(data.availableBalance);
+}
+
+async function loadFundLedger() {
+  const tbody = $('#fundExpenseBody');
+  const token = getToken();
+
+  if (!token) {
+    $('#fundTotalCollected').textContent = '-';
+    $('#fundTotalSpent').textContent = '-';
+    $('#fundAvailableBalance').textContent = '-';
+    tbody.innerHTML =
+      `<tr><td colspan="5" class="text-center text-muted">관리자 토큰 저장 후 조회할 수 있습니다.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML =
+    `<tr><td colspan="5" class="text-center text-muted">로딩 중...</td></tr>`;
+
+  try {
+    const data = await fetchJSON('/api/admin/fund', {
+      headers: { 'x-admin-token': token }
+    });
+    renderFundSummary(data);
+
+    const expenses = data.expenses || [];
+    if (!expenses.length) {
+      tbody.innerHTML =
+        `<tr><td colspan="5" class="text-center text-muted">사용 내역이 없습니다.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = expenses.map(expense => {
+      const spentDate = (expense.spentAt || '').split('T')[0] || '-';
+      const canceledDate = (expense.canceledAt || '').split('T')[0] || '';
+      const status = expense.canceledAt
+        ? `<span class="badge text-bg-secondary">취소됨</span>${canceledDate ? `<br><span class="text-muted small">${canceledDate}</span>` : ''}`
+        : `<button class="btn btn-outline-danger btn-sm cancel-fund-expense-btn"
+                   data-expense-id="${escapeHTML(expense.id)}">취소</button>`;
+
+      return `
+        <tr${expense.canceledAt ? ' class="text-muted"' : ''}>
+          <td>${fmtWeekId(expense.weekId)}</td>
+          <td>${fmtWon(expense.amount)}</td>
+          <td>${escapeHTML(expense.reason)}</td>
+          <td>${spentDate}</td>
+          <td>${status}</td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    $('#fundTotalCollected').textContent = '-';
+    $('#fundTotalSpent').textContent = '-';
+    $('#fundAvailableBalance').textContent = '-';
+    tbody.innerHTML =
+      `<tr><td colspan="5" class="text-center text-danger">조회 실패: ${escapeHTML(err.message || '오류')}</td></tr>`;
+    setAlert('danger', err.message || '벌금 사용 내역 조회 실패');
+  }
+}
+
+async function saveFundExpense() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const weekId = $('#fundExpenseWeekId').value;
+    const amount = Number($('#fundExpenseAmount').value);
+    const reason = $('#fundExpenseReason').value.trim();
+
+    if (!weekId) throw new Error('주차를 선택하세요.');
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw new Error('사용 금액은 1원 이상의 정수여야 합니다.');
+    }
+    if (!reason) throw new Error('사용 사유를 입력하세요.');
+
+    const data = await fetchJSON('/api/admin/fund/expenses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ weekId, amount, reason })
+    });
+
+    $('#fundExpenseAmount').value = '';
+    $('#fundExpenseReason').value = '';
+    setAlert(
+      'success',
+      `${fmtWeekId(data.expense.weekId)} · ${fmtWon(data.expense.amount)} 사용 내역을 저장했습니다.`
+    );
+    await loadFundLedger();
+  } catch (err) {
+    setAlert('danger', err.message || '벌금 사용 내역 저장 실패');
+  }
+}
+
+async function cancelFundExpense(expenseId) {
+  const ok = confirm('이 벌금 사용 내역을 취소하시겠습니까? 취소한 금액은 사용 가능액으로 복구됩니다.');
+  if (!ok) return;
+
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const data = await fetchJSON(
+      `/api/admin/fund/expenses/${encodeURIComponent(expenseId)}/cancel`,
+      {
+        method: 'POST',
+        headers: { 'x-admin-token': token }
+      }
+    );
+
+    setAlert(
+      data.alreadyCanceled ? 'info' : 'warning',
+      data.alreadyCanceled
+        ? '이미 취소된 사용 내역입니다.'
+        : `${fmtWon(data.expense.amount)} 사용 내역을 취소했습니다.`
+    );
+    await loadFundLedger();
+  } catch (err) {
+    setAlert('danger', err.message || '벌금 사용 내역 취소 실패');
   }
 }
 
@@ -576,6 +704,7 @@ async function submitPayment() {
     payModal.hide();
     await loadMemberSummary();
     await loadLedgerChart();
+    await loadFundLedger();
   } catch (err) {
     alert('납부 실패: ' + (err.message || '오류'));
   }
@@ -729,6 +858,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('#saveTokenBtn').addEventListener('click', () => {
     setToken(input.value.trim());
     setAlert('success', '토큰 저장 완료');
+    loadFundLedger();
   });
 
   $('#finalizeBtn').addEventListener('click', () => {
@@ -749,6 +879,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('#saveExtraFineBtn').addEventListener('click', saveExtraFine);
   $('#usePassBtn').addEventListener('click', () => setPassUsage(true));
   $('#revokePassBtn').addEventListener('click', () => setPassUsage(false));
+  $('#saveFundExpenseBtn').addEventListener('click', saveFundExpense);
 
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
@@ -768,12 +899,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       openPaymentLog(logBtn.dataset.member);
       return;
     }
+
+    const cancelFundBtn = e.target.closest('.cancel-fund-expense-btn');
+    if (cancelFundBtn) {
+      cancelFundExpense(cancelFundBtn.dataset.expenseId);
+    }
   });
 
   $('#submitPayBtn').addEventListener('click', submitPayment);
 
   await loadWeek();
   await loadExcuseControls();
+  await loadFundLedger();
   await loadMemberSummary();
   await loadLedgerChart();
 });

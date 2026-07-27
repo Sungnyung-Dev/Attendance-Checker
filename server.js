@@ -275,6 +275,42 @@ function countPassesForMember(ledger, memberId, excludeWeekId = null) {
   ).length;
 }
 
+function normalizeFundExpenses(ledger) {
+  return Array.isArray(ledger.fundExpenses)
+    ? ledger.fundExpenses.map(expense => ({
+        ...expense,
+        amount: toMoney(expense.amount),
+        reason: String(expense.reason || ''),
+        canceledAt: expense.canceledAt || null
+      }))
+    : [];
+}
+
+function calculateFundSummary(ledger) {
+  const totalCollected = (ledger.entries || []).reduce((entrySum, entry) => {
+    const paid = Array.isArray(entry.payments)
+      ? entry.payments.reduce(
+          (paymentSum, payment) => paymentSum + toMoney(payment.amount),
+          0
+        )
+      : 0;
+    return entrySum + paid;
+  }, 0);
+
+  const expenses = normalizeFundExpenses(ledger);
+  const totalSpent = expenses.reduce(
+    (sum, expense) => expense.canceledAt ? sum : sum + expense.amount,
+    0
+  );
+
+  return {
+    totalCollected,
+    totalSpent,
+    availableBalance: totalCollected - totalSpent,
+    expenses
+  };
+}
+
 async function recalcLedgerForWeek(weekId, week) {
   const ledger = await readJson('data/ledger.json', { entries: [] });
   if (!Array.isArray(ledger.entries)) ledger.entries = [];
@@ -590,6 +626,123 @@ app.post('/api/ledger/pay', authAdmin, async (req, res) => {
       memberTotalPaid,
       memberOutstanding,
       fullyPaid: memberOutstanding === 0
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/admin/fund', authAdmin, async (req, res) => {
+  try {
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const summary = calculateFundSummary(ledger);
+    const expenses = summary.expenses
+      .slice()
+      .sort((a, b) => String(b.spentAt || '').localeCompare(String(a.spentAt || '')));
+
+    return res.json({
+      totalCollected: summary.totalCollected,
+      totalSpent: summary.totalSpent,
+      availableBalance: summary.availableBalance,
+      expenses
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/fund/expenses', authAdmin, async (req, res) => {
+  try {
+    const { weekId, amount, reason } = req.body || {};
+
+    if (!weekId) {
+      return res.status(400).json({ error: 'weekId is required' });
+    }
+
+    let info;
+    try {
+      info = getWeekInfoFromWeekId(weekId);
+    } catch {
+      return res.status(400).json({ error: 'invalid weekId' });
+    }
+
+    const expenseAmount = Number(amount);
+    if (!Number.isInteger(expenseAmount) || expenseAmount <= 0) {
+      return res.status(400).json({ error: 'amount must be a positive integer' });
+    }
+
+    const expenseReason = String(reason || '').trim();
+    if (!expenseReason) {
+      return res.status(400).json({ error: 'reason is required' });
+    }
+
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const summary = calculateFundSummary(ledger);
+
+    if (expenseAmount > summary.availableBalance) {
+      return res.status(400).json({
+        error: `사용 금액이 현재 사용 가능액(${summary.availableBalance.toLocaleString()}원)을 초과합니다.`
+      });
+    }
+
+    if (!Array.isArray(ledger.fundExpenses)) ledger.fundExpenses = [];
+
+    const spentAt = new Date().toISOString();
+    const expense = {
+      id: `fund_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      weekId: info.weekId,
+      amount: expenseAmount,
+      reason: expenseReason,
+      spentAt,
+      canceledAt: null
+    };
+
+    ledger.fundExpenses.push(expense);
+    await writeJson('data/ledger.json', ledger);
+
+    const refreshed = calculateFundSummary(ledger);
+    return res.json({
+      ok: true,
+      expense,
+      totalCollected: refreshed.totalCollected,
+      totalSpent: refreshed.totalSpent,
+      availableBalance: refreshed.availableBalance
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/fund/expenses/:expenseId/cancel', authAdmin, async (req, res) => {
+  try {
+    const { expenseId } = req.params;
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+
+    if (!Array.isArray(ledger.fundExpenses)) ledger.fundExpenses = [];
+    const expense = ledger.fundExpenses.find(item => item.id === expenseId);
+
+    if (!expense) {
+      return res.status(404).json({ error: 'fund expense not found' });
+    }
+
+    let alreadyCanceled = true;
+    if (!expense.canceledAt) {
+      expense.canceledAt = new Date().toISOString();
+      alreadyCanceled = false;
+      await writeJson('data/ledger.json', ledger);
+    }
+
+    const summary = calculateFundSummary(ledger);
+    return res.json({
+      ok: true,
+      expense,
+      alreadyCanceled,
+      totalCollected: summary.totalCollected,
+      totalSpent: summary.totalSpent,
+      availableBalance: summary.availableBalance
     });
   } catch (err) {
     console.error(err);
