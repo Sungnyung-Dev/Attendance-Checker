@@ -57,6 +57,7 @@ function getTodayLocalDateString() {
 }
 
 let memberMap = null;
+let adminMembers = [];
 const memberSelectIds = [
   'excuseMemberId',
   'memberWeekMemberId',
@@ -151,6 +152,202 @@ async function loadExcuseControls() {
       const el = document.getElementById(id);
       if (el) el.innerHTML = `<option value="">주차 불러오기 실패</option>`;
     });
+  }
+}
+
+function renderPassMemberStatus() {
+  const memberId = $('#passMemberId').value;
+  const status = $('#passMemberStatus');
+  const member = adminMembers.find(item => item.id === memberId);
+
+  if (!memberId) {
+    status.textContent = '멤버를 선택하세요.';
+    return;
+  }
+  if (!member) {
+    status.textContent = '까방권 정보를 불러오지 못했습니다.';
+    return;
+  }
+
+  status.textContent =
+    `사용 ${Number(member.passUsedCount) || 0}/${Number(member.passLimit) || 3}`;
+}
+
+async function loadAdminMembers() {
+  const tbody = $('#adminMemberBody');
+  const token = getToken();
+
+  if (!token) {
+    adminMembers = [];
+    tbody.innerHTML =
+      `<tr><td colspan="5" class="text-center text-muted">관리자 토큰 저장 후 조회할 수 있습니다.</td></tr>`;
+    renderPassMemberStatus();
+    return;
+  }
+
+  tbody.innerHTML =
+    `<tr><td colspan="5" class="text-center text-muted">로딩 중...</td></tr>`;
+
+  try {
+    const data = await fetchJSON('/api/admin/members', {
+      headers: { 'x-admin-token': token }
+    });
+    adminMembers = data.members || [];
+    if (!memberMap) memberMap = {};
+    adminMembers.forEach(member => {
+      memberMap[member.id] = member.name || member.id;
+    });
+
+    if (!adminMembers.length) {
+      tbody.innerHTML =
+        `<tr><td colspan="5" class="text-center text-muted">등록된 멤버가 없습니다.</td></tr>`;
+      renderPassMemberStatus();
+      return;
+    }
+
+    tbody.innerHTML = adminMembers.map(member => {
+      const active = member.active !== false;
+      const statusBadge = active
+        ? '<span class="badge text-bg-success">활성</span>'
+        : '<span class="badge text-bg-secondary">비활성</span>';
+      const statusButton = active
+        ? `<button class="btn btn-outline-secondary btn-sm member-status-btn"
+                   data-member-id="${escapeHTML(member.id)}" data-active="false">비활성화</button>`
+        : `<button class="btn btn-outline-primary btn-sm member-status-btn"
+                   data-member-id="${escapeHTML(member.id)}" data-active="true">활성화</button>`;
+
+      return `
+        <tr${active ? '' : ' class="text-muted"'}>
+          <td>${escapeHTML(member.name || member.id)}</td>
+          <td><span class="text-muted small">${escapeHTML(member.id)}</span></td>
+          <td>사용 ${Number(member.passUsedCount) || 0}/${Number(member.passLimit) || 3}</td>
+          <td>${statusBadge}</td>
+          <td>
+            <div class="d-flex flex-wrap gap-1">
+              ${statusButton}
+              <button class="btn btn-outline-danger btn-sm delete-member-btn"
+                      data-member-id="${escapeHTML(member.id)}">삭제</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+    renderPassMemberStatus();
+  } catch (err) {
+    adminMembers = [];
+    tbody.innerHTML =
+      `<tr><td colspan="5" class="text-center text-danger">조회 실패: ${escapeHTML(err.message || '오류')}</td></tr>`;
+    renderPassMemberStatus();
+    setAlert('danger', err.message || '멤버 목록 조회 실패');
+  }
+}
+
+async function refreshMemberManagement() {
+  memberMap = null;
+  await loadExcuseControls();
+  await loadAdminMembers();
+  await loadMemberSummary();
+}
+
+async function addMember() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const name = $('#newMemberName').value.trim();
+    if (!name) throw new Error('새 멤버 이름을 입력하세요.');
+
+    const data = await fetchJSON('/api/admin/members', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ name })
+    });
+
+    $('#newMemberName').value = '';
+    setAlert('success', `${data.member.name} (${data.member.id}) 멤버를 추가했습니다.`);
+    await refreshMemberManagement();
+  } catch (err) {
+    setAlert('danger', err.message || '멤버 추가 실패');
+  }
+}
+
+async function setMemberStatus(memberId, active) {
+  const member = adminMembers.find(item => item.id === memberId);
+  const name = member?.name || memberId;
+  const verb = active ? '활성화' : '비활성화';
+  if (!confirm(`${name} 멤버를 ${verb}하시겠습니까?`)) return;
+
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    await fetchJSON(`/api/admin/members/${encodeURIComponent(memberId)}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': token
+      },
+      body: JSON.stringify({ active })
+    });
+
+    setAlert('success', `${name} 멤버를 ${verb}했습니다.`);
+    await refreshMemberManagement();
+  } catch (err) {
+    setAlert('danger', err.message || `멤버 ${verb} 실패`);
+  }
+}
+
+async function deleteMember(memberId) {
+  const member = adminMembers.find(item => item.id === memberId);
+  const name = member?.name || memberId;
+  if (!confirm(`${name} 멤버를 삭제하시겠습니까? 기록이 있는 멤버는 삭제되지 않습니다.`)) return;
+
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    await fetchJSON(`/api/admin/members/${encodeURIComponent(memberId)}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-token': token }
+    });
+
+    setAlert('warning', `${name} 멤버를 삭제했습니다.`);
+    await refreshMemberManagement();
+  } catch (err) {
+    setAlert('danger', err.message || '멤버 삭제 실패');
+  }
+}
+
+async function grantPass() {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('관리자 토큰을 먼저 저장하세요.');
+
+    const memberId = $('#passMemberId').value;
+    if (!memberId) throw new Error('멤버를 선택하세요.');
+    const member = adminMembers.find(item => item.id === memberId);
+    const name = member?.name || memberMap?.[memberId] || memberId;
+    if (!confirm(`${name} 멤버의 까방권 사용 한도를 1회 늘리시겠습니까?`)) return;
+
+    const data = await fetchJSON(
+      `/api/admin/members/${encodeURIComponent(memberId)}/pass-grant`,
+      {
+        method: 'POST',
+        headers: { 'x-admin-token': token }
+      }
+    );
+
+    setAlert(
+      'success',
+      `${name} · 까방권 추가 완료 (사용 ${data.passUsedCount}/${data.passLimit})`
+    );
+    await loadAdminMembers();
+    await loadMemberSummary();
+  } catch (err) {
+    setAlert('danger', err.message || '까방권 추가 실패');
   }
 }
 
@@ -441,10 +638,11 @@ async function setPassUsage(used) {
 
     setAlert(
       'success',
-      `${name} · ${fmtWeekId(res.weekId)} · 까방권 ${verb} 완료 (사용 ${res.passUsedCount}/3)`
+      `${name} · ${fmtWeekId(res.weekId)} · 까방권 ${verb} 완료 (사용 ${res.passUsedCount}/${res.passLimit})`
     );
 
     await loadExcuseControls();
+    await loadAdminMembers();
     await loadMemberSummary();
     await loadLedgerChart();
   } catch (err) {
@@ -630,6 +828,7 @@ async function loadMemberSummary() {
                        data-member="${r.memberId}">내역</button>
              </div>`;
         const passUsedCount = Number(r.passUsedCount) || 0;
+        const passLimit = Number(r.passLimit) || 3;
 
         return `
           <tr>
@@ -638,7 +837,7 @@ async function loadMemberSummary() {
             <td>${fmtWon(r.totalFine ?? 0)}</td>
             <td>${fmtWon(r.totalPaid ?? 0)}</td>
             <td>${fmtWon(r.outstanding ?? 0)}</td>
-            <td>사용 ${passUsedCount}/3</td>
+            <td>사용 ${passUsedCount}/${passLimit}</td>
             <td>${statusCell}</td>
           </tr>
         `;
@@ -919,6 +1118,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     setToken(input.value.trim());
     setAlert('success', '토큰 저장 완료');
     await loadFundLedger();
+    await loadAdminMembers();
+    await loadMemberSummary();
     await loadLedgerChart();
   });
 
@@ -940,14 +1141,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('#saveExtraFineBtn').addEventListener('click', saveExtraFine);
   $('#usePassBtn').addEventListener('click', () => setPassUsage(true));
   $('#revokePassBtn').addEventListener('click', () => setPassUsage(false));
+  $('#grantPassBtn').addEventListener('click', grantPass);
+  $('#passMemberId').addEventListener('change', renderPassMemberStatus);
   $('#saveFundExpenseBtn').addEventListener('click', saveFundExpense);
+  $('#addMemberBtn').addEventListener('click', addMember);
+  $('#newMemberName').addEventListener('keydown', e => {
+    if (e.key === 'Enter') addMember();
+  });
 
   $('#refreshMemberSummaryBtn').addEventListener('click', loadMemberSummary);
   $('#unpaidOnlyChk').addEventListener('change', loadMemberSummary);
   $('#refreshChartBtn').addEventListener('click', loadLedgerChart);
-  $('#settlement-tab').addEventListener('shown.bs.tab', async () => {
-    await loadMemberSummary();
-  });
 
   payModal = new bootstrap.Modal(document.getElementById('payModal'));
   paymentLogModal = new bootstrap.Modal(document.getElementById('paymentLogModal'));
@@ -968,6 +1172,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     const cancelFundBtn = e.target.closest('.cancel-fund-expense-btn');
     if (cancelFundBtn) {
       cancelFundExpense(cancelFundBtn.dataset.expenseId);
+      return;
+    }
+
+    const statusBtn = e.target.closest('.member-status-btn');
+    if (statusBtn) {
+      setMemberStatus(statusBtn.dataset.memberId, statusBtn.dataset.active === 'true');
+      return;
+    }
+
+    const deleteBtn = e.target.closest('.delete-member-btn');
+    if (deleteBtn) {
+      deleteMember(deleteBtn.dataset.memberId);
     }
   });
 
@@ -976,6 +1192,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   await loadWeek();
   await loadExcuseControls();
   await loadFundLedger();
+  await loadAdminMembers();
   await loadMemberSummary();
   await loadLedgerChart();
 });

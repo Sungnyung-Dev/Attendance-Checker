@@ -113,6 +113,87 @@ async function loadActiveMembers() {
   return members.filter(m => m.active !== false);
 }
 
+async function loadMembersStore() {
+  const data = await readJson('data/members.json', { members: [] });
+  if (Array.isArray(data)) {
+    return { data: { members: data }, members: data };
+  }
+
+  if (!Array.isArray(data.members)) data.members = [];
+  return { data, members: data.members };
+}
+
+function getPassBonus(member) {
+  const bonus = Number(member?.passBonus);
+  return Number.isInteger(bonus) && bonus > 0 ? bonus : 0;
+}
+
+function getPassLimit(member) {
+  return PASS_LIMIT + getPassBonus(member);
+}
+
+function getRecordMemberId(record) {
+  return record?.memberId || record?.memberID || record?.userId ||
+    record?.userID || record?.uid || record?.id || null;
+}
+
+function collectMemberIds(value, ids = new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach(item => collectMemberIds(item, ids));
+    return ids;
+  }
+  if (!value || typeof value !== 'object') return ids;
+
+  const recordId = getRecordMemberId(value);
+  if (recordId) ids.add(String(recordId));
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (/^u\d+$/i.test(key)) ids.add(key);
+    collectMemberIds(nested, ids);
+  }
+  return ids;
+}
+
+async function loadAttendanceFiles() {
+  let names = [];
+  try {
+    names = await fsp.readdir(path.resolve('data'));
+  } catch {
+    return [];
+  }
+
+  const files = names.filter(name => /^attendance-.+\.json$/.test(name));
+  return Promise.all(files.map(async name => ({
+    name,
+    data: await readJson(path.join('data', name), {})
+  })));
+}
+
+async function generateMemberId(members) {
+  const ids = new Set(members.map(member => String(member.id || '')));
+  const ledger = await readJson('data/ledger.json', { entries: [] });
+  collectMemberIds(ledger, ids);
+
+  const attendanceFiles = await loadAttendanceFiles();
+  attendanceFiles.forEach(file => collectMemberIds(file.data, ids));
+
+  let max = 0;
+  for (const id of ids) {
+    const match = /^u(\d+)$/i.exec(id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return `u${String(max + 1).padStart(2, '0')}`;
+}
+
+async function memberHasHistoricalRecords(memberId) {
+  const ledger = await readJson('data/ledger.json', { entries: [] });
+  const hasLedger = (ledger.entries || []).some(entry => entry.memberId === memberId);
+  if (hasLedger) return true;
+
+  const attendanceFiles = await loadAttendanceFiles();
+  return attendanceFiles.some(file => collectMemberIds(file.data).has(memberId));
+}
+
 async function loadWeekAttendanceByWeekId(weekId, fallbackStart, fallbackEnd) {
   const weekPath = getWeekFilePath(weekId);
   const week = await readJson(weekPath, {
@@ -444,6 +525,162 @@ app.get('/api/members', async (req, res) => {
   res.json(activeMembers);
 });
 
+app.get('/api/admin/members', authAdmin, async (req, res) => {
+  try {
+    const { members } = await loadMembersStore();
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const passCounts = {};
+
+    for (const entry of ledger.entries || []) {
+      if (normalizeLedgerEntry(entry).passUsed) {
+        passCounts[entry.memberId] = (passCounts[entry.memberId] || 0) + 1;
+      }
+    }
+
+    const rows = members.map(member => {
+      const passUsedCount = passCounts[member.id] || 0;
+      const passBonus = getPassBonus(member);
+      const passLimit = getPassLimit(member);
+      return {
+        ...member,
+        active: member.active !== false,
+        passBonus,
+        passLimit,
+        passUsedCount,
+        passRemaining: Math.max(0, passLimit - passUsedCount)
+      };
+    });
+
+    return res.json({ members: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/members', authAdmin, async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+
+    const { data, members } = await loadMembersStore();
+    const normalizedName = name.toLocaleLowerCase('ko-KR');
+    const duplicate = members.some(member =>
+      String(member.name || '').trim().toLocaleLowerCase('ko-KR') === normalizedName
+    );
+    if (duplicate) {
+      return res.status(409).json({ error: '같은 이름의 멤버가 이미 있습니다.' });
+    }
+
+    const member = {
+      id: await generateMemberId(members),
+      name,
+      active: true,
+      passBonus: 0
+    };
+    members.push(member);
+    data.members = members;
+    await writeJson('data/members.json', data);
+
+    return res.status(201).json({
+      ok: true,
+      member: {
+        ...member,
+        passLimit: PASS_LIMIT,
+        passUsedCount: 0,
+        passRemaining: PASS_LIMIT
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.patch('/api/admin/members/:memberId/status', authAdmin, async (req, res) => {
+  try {
+    const { memberId } = req.params;
+    const { active } = req.body || {};
+    if (typeof active !== 'boolean') {
+      return res.status(400).json({ error: 'boolean active is required' });
+    }
+
+    const { data, members } = await loadMembersStore();
+    const member = members.find(item => item.id === memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'member not found' });
+    }
+
+    member.active = active;
+    data.members = members;
+    await writeJson('data/members.json', data);
+    return res.json({ ok: true, member });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.delete('/api/admin/members/:memberId', authAdmin, async (req, res) => {
+  try {
+    const { memberId } = req.params;
+    const { data, members } = await loadMembersStore();
+    const index = members.findIndex(member => member.id === memberId);
+    if (index < 0) {
+      return res.status(404).json({ error: 'member not found' });
+    }
+
+    if (await memberHasHistoricalRecords(memberId)) {
+      return res.status(409).json({
+        error: '출석 또는 정산 기록이 있는 멤버는 삭제할 수 없습니다. 비활성화를 사용하세요.'
+      });
+    }
+
+    const [member] = members.splice(index, 1);
+    data.members = members;
+    await writeJson('data/members.json', data);
+    return res.json({ ok: true, member });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/admin/members/:memberId/pass-grant', authAdmin, async (req, res) => {
+  try {
+    const { memberId } = req.params;
+    const { data, members } = await loadMembersStore();
+    const member = members.find(item => item.id === memberId);
+    if (!member) {
+      return res.status(404).json({ error: 'member not found' });
+    }
+    if (member.active === false) {
+      return res.status(400).json({ error: '비활성 멤버에게는 까방권을 추가할 수 없습니다.' });
+    }
+
+    member.passBonus = getPassBonus(member) + 1;
+    data.members = members;
+    await writeJson('data/members.json', data);
+
+    const ledger = await readJson('data/ledger.json', { entries: [] });
+    const passUsedCount = countPassesForMember(ledger, memberId);
+    const passLimit = getPassLimit(member);
+    return res.json({
+      ok: true,
+      memberId,
+      passBonus: member.passBonus,
+      passLimit,
+      passUsedCount,
+      passRemaining: Math.max(0, passLimit - passUsedCount)
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // 오늘 1일 1회만 인정, 주 파일 없으면 자동 생성
 app.post('/api/checkin', async (req, res) => {
   try {
@@ -483,6 +720,10 @@ app.get('/api/ledger', async (req, res) => {
 
     const ledger = await readJson('data/ledger.json', { entries: [] });
     const allEntries = (ledger.entries || []).map(e => normalizeLedgerEntry(e));
+    const { members } = await loadMembersStore();
+    const passLimitByMember = Object.fromEntries(
+      members.map(member => [member.id, getPassLimit(member)])
+    );
     const passCounts = {};
     for (const e of allEntries) {
       if (e.passUsed) passCounts[e.memberId] = (passCounts[e.memberId] || 0) + 1;
@@ -540,20 +781,24 @@ app.get('/api/ledger', async (req, res) => {
         byMember[e.memberId].weeks.add(e.weekId);
         if (e.passUsed) byMember[e.memberId].passUsedInRows += 1;
       }
-      const rows = Object.values(byMember).map(x => ({
-        memberId: x.memberId,
-        totalDeficit: x.totalDeficit,
-        totalFine: x.totalFine,
-        totalAttendanceFine: x.totalAttendanceFine,
-        totalExtraFine: x.totalExtraFine,
-        totalPaid: x.totalPaid,
-        outstanding: x.outstanding,
-        fullyPaid: x.outstanding === 0,
-        passUsedCount: x.passUsedCount,
-        passUsedInRows: x.passUsedInRows,
-        passRemaining: Math.max(0, PASS_LIMIT - x.passUsedCount),
-        weeks: Array.from(x.weeks).sort()
-      })).sort((a,b)=> a.memberId > b.memberId ? 1 : -1);
+      const rows = Object.values(byMember).map(x => {
+        const passLimit = passLimitByMember[x.memberId] || PASS_LIMIT;
+        return {
+          memberId: x.memberId,
+          totalDeficit: x.totalDeficit,
+          totalFine: x.totalFine,
+          totalAttendanceFine: x.totalAttendanceFine,
+          totalExtraFine: x.totalExtraFine,
+          totalPaid: x.totalPaid,
+          outstanding: x.outstanding,
+          fullyPaid: x.outstanding === 0,
+          passUsedCount: x.passUsedCount,
+          passUsedInRows: x.passUsedInRows,
+          passLimit,
+          passRemaining: Math.max(0, passLimit - x.passUsedCount),
+          weeks: Array.from(x.weeks).sort()
+        };
+      }).sort((a,b)=> a.memberId > b.memberId ? 1 : -1);
       return res.json({ summary: 'member', rows });
     }
 
@@ -1300,9 +1545,10 @@ app.post('/api/admin/ledger/pass', authAdmin, async (req, res) => {
 
     const current = normalizeLedgerEntry(entry);
     const usedCountExcludingCurrent = countPassesForMember(ledger, memberId, info.weekId);
+    const passLimit = getPassLimit(member);
 
-    if (used && !current.passUsed && usedCountExcludingCurrent >= PASS_LIMIT) {
-      return res.status(400).json({ error: `까방권은 멤버당 최대 ${PASS_LIMIT}회까지 사용할 수 있습니다.` });
+    if (used && !current.passUsed && usedCountExcludingCurrent >= passLimit) {
+      return res.status(400).json({ error: `까방권은 이 멤버에게 최대 ${passLimit}회까지 사용할 수 있습니다.` });
     }
 
     entry.passUsed = used;
@@ -1319,7 +1565,8 @@ app.post('/api/admin/ledger/pass', authAdmin, async (req, res) => {
       weekId: info.weekId,
       memberId,
       passUsedCount,
-      passRemaining: Math.max(0, PASS_LIMIT - passUsedCount),
+      passLimit,
+      passRemaining: Math.max(0, passLimit - passUsedCount),
       ...normalizeLedgerEntry(entry)
     });
   } catch (err) {

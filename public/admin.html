@@ -23,44 +23,23 @@
       </div>
     </div>
 
+    <!-- 현재 주 정보 -->
+    <div class="card mb-3">
+      <div class="card-body d-flex flex-wrap gap-3 justify-content-between align-items-center">
+        <div>
+          <div class="fw-semibold">현재 주</div>
+          <div id="weekInfo" class="text-muted small">로딩 중…</div>
+        </div>
+        <button id="finalizeBtn" class="btn btn-danger">주간 마감</button>
+      </div>
+    </div>
+
     <!-- 결과 -->
     <div id="result" class="alert d-none" role="alert"></div>
 
+    <!-- 출석 인정 관리 -->
     <div class="card mb-3">
-      <div class="card-header bg-white p-0">
-        <ul class="nav nav-tabs nav-fill border-bottom-0" id="adminTabs" role="tablist">
-          <li class="nav-item" role="presentation">
-            <button class="nav-link active py-3" id="attendance-tab"
-                    data-bs-toggle="tab" data-bs-target="#attendance-pane"
-                    type="button" role="tab" aria-controls="attendance-pane"
-                    aria-selected="true">출석 관리</button>
-          </li>
-          <li class="nav-item" role="presentation">
-            <button class="nav-link py-3" id="fine-tab"
-                    data-bs-toggle="tab" data-bs-target="#fine-pane"
-                    type="button" role="tab" aria-controls="fine-pane"
-                    aria-selected="false">벌금 관리</button>
-          </li>
-          <li class="nav-item" role="presentation">
-            <button class="nav-link py-3" id="settlement-tab"
-                    data-bs-toggle="tab" data-bs-target="#settlement-pane"
-                    type="button" role="tab" aria-controls="settlement-pane"
-                    aria-selected="false">정산 현황</button>
-          </li>
-        </ul>
-      </div>
       <div class="card-body">
-        <div class="tab-content" id="adminTabContent">
-          <div class="tab-pane fade show active" id="attendance-pane"
-               role="tabpanel" aria-labelledby="attendance-tab" tabindex="0">
-            <div class="d-flex flex-wrap gap-3 justify-content-between align-items-center border-bottom pb-3 mb-4">
-              <div>
-                <div class="fw-semibold">현재 주</div>
-                <div id="weekInfo" class="text-muted small">로딩 중…</div>
-              </div>
-              <button id="finalizeBtn" class="btn btn-danger">주간 마감</button>
-            </div>
-
         <div class="fw-semibold mb-1">출석 인정 관리</div>
         <div class="text-muted small mb-3">
           개별 날짜, 멤버별 주차, 시험 주간 전체 출석 인정
@@ -143,10 +122,12 @@
             </div>
           </div>
         </div>
-          </div>
+      </div>
+    </div>
 
-          <div class="tab-pane fade" id="fine-pane"
-               role="tabpanel" aria-labelledby="fine-tab" tabindex="0">
+    <!-- 벌금 / 까방권 관리 -->
+    <div class="card mb-3">
+      <div class="card-body">
         <div class="fw-semibold mb-1">벌금 / 까방권 관리</div>
         <div class="text-muted small mb-3">
           주차별 추가 벌금, 멤버별 까방권, 벌금 사용 내역을 관리합니다.
@@ -194,6 +175,11 @@
                 <select id="passMemberId" class="form-select">
                   <option value="">멤버를 선택하세요</option>
                 </select>
+              </div>
+
+              <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center border rounded p-2 mb-3">
+                <span id="passMemberStatus" class="text-muted small">멤버를 선택하세요.</span>
+                <button id="grantPassBtn" class="btn btn-outline-success btn-sm">까방권 1개 추가</button>
               </div>
 
               <div class="mb-3">
@@ -278,11 +264,49 @@
             </tbody>
           </table>
         </div>
-          </div>
+      </div>
+    </div>
 
-          <div class="tab-pane fade" id="settlement-pane"
-               role="tabpanel" aria-labelledby="settlement-tab" tabindex="0">
-        <section class="mb-4">
+    <!-- 멤버 관리 -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="fw-semibold mb-1">멤버 관리</div>
+        <div class="text-muted small mb-3">멤버 추가, 활성화, 비활성화 및 안전한 삭제</div>
+
+        <div class="row g-2 align-items-end mb-4">
+          <div class="col-12 col-md-9">
+            <label for="newMemberName" class="form-label">새 멤버 이름</label>
+            <input id="newMemberName" class="form-control" type="text" placeholder="이름을 입력하세요">
+          </div>
+          <div class="col-12 col-md-3">
+            <button id="addMemberBtn" class="btn btn-primary w-100">멤버 추가</button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>ID</th>
+                <th>까방권</th>
+                <th>상태</th>
+                <th>관리</th>
+              </tr>
+            </thead>
+            <tbody id="adminMemberBody">
+              <tr>
+                <td colspan="5" class="text-center text-muted">관리자 토큰 저장 후 조회할 수 있습니다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 멤버별 합계 -->
+    <div class="card mb-3">
+      <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <div>
             <div class="fw-semibold">멤버별 합계</div>
@@ -327,9 +351,6 @@
               </tr>
             </tfoot>
           </table>
-        </div>
-        </section>
-          </div>
         </div>
       </div>
     </div>
