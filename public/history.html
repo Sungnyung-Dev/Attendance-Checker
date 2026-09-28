@@ -20,6 +20,22 @@
     #weekList > * {
       flex-shrink: 0;
     }
+
+    @media (min-width: 768px) {
+      .week-list-column {
+        position: relative;
+      }
+
+      .week-list-card {
+        position: absolute;
+        inset: 0 calc(var(--bs-gutter-x) * .5);
+      }
+
+      .week-list-body {
+        min-height: 0;
+        max-height: none;
+      }
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -31,8 +47,8 @@
 
     <div class="row g-3">
       <!-- 좌측: 주차 선택 -->
-      <div class="col-12 col-md-4">
-        <div class="card">
+      <div class="col-12 col-md-4 week-list-column">
+        <div class="card week-list-card">
           <div class="card-body week-list-body">
             <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
               <div class="fw-semibold">주차 목록</div>
